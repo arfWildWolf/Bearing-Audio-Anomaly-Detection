@@ -4,10 +4,38 @@
 		{
 			"label": "Train Bearing Anomaly Detector",
 			"type": "shell",
-			"command": "c:/python314/python.exe",
+			"command": "${command:python.interpreterPath}",
 			"args": [
 				"bearing_anomaly.py",
-				"train"
+				"train",
+				"--device",
+				"cuda"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Check CUDA Availability",
+			"type": "shell",
+			"command": "${command:python.interpreterPath}",
+			"args": [
+				"gpu_check.py"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Predict Bearing Sample on GPU",
+			"type": "shell",
+			"command": "${command:python.interpreterPath}",
+			"args": [
+				"bearing_anomaly.py",
+				"predict",
+				"--device",
+				"cuda",
+				"--checkpoint",
+				"outputs\\bearing_classifier.pt",
+				"bearing\\test\\section_00_source_test_anomaly_0000_noAttribute.wav"
 			],
 			"isBackground": false,
 			"problemMatcher": []

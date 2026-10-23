@@ -167,17 +167,22 @@ def _probabilities(
     return np.concatenate(probabilities)
 
 
-def _best_threshold(
-    labels: np.ndarray, scores: np.ndarray, beta: float = 1.0
+def _recall_at_minimum_precision_threshold(
+    labels: np.ndarray, scores: np.ndarray, minimum_precision: float
 ) -> float:
     precision, recall, thresholds = precision_recall_curve(labels, scores)
     if thresholds.size == 0:
         raise ValueError("Could not calibrate a threshold from the labeled clips.")
-    beta_squared = beta**2
-    f_values = (1 + beta_squared) * precision[:-1] * recall[:-1] / (
-        beta_squared * precision[:-1] + recall[:-1] + 1e-12
-    )
-    return float(thresholds[int(np.argmax(f_values))])
+    feasible = np.flatnonzero(precision[:-1] >= minimum_precision)
+    if feasible.size == 0:
+        raise ValueError(
+            f"No calibration threshold achieved the requested precision "
+            f"of {minimum_precision:.3f}."
+        )
+    best_recall = recall[feasible].max()
+    best_candidates = feasible[recall[feasible] == best_recall]
+    best_index = best_candidates[np.argmax(precision[best_candidates])]
+    return float(thresholds[best_index])
 
 
 def _set_seed(seed: int) -> None:
@@ -187,6 +192,19 @@ def _set_seed(seed: int) -> None:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
     torch.set_num_threads(max(1, min(8, torch.get_num_threads())))
+
+
+def _get_device(requested: str) -> torch.device:
+    if requested == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "CUDA was requested but PyTorch cannot access a CUDA GPU. "
+                "Install a CUDA-enabled PyTorch build and verify the NVIDIA driver."
+            )
+        return torch.device("cuda")
+    if requested == "cpu":
+        return torch.device("cpu")
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def _normalize(
@@ -288,7 +306,7 @@ def train(args: argparse.Namespace) -> None:
         num_workers=0,
     )
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = _get_device(args.device)
     model = FeatureClassifier().to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
     positive_count = int(fit_labels[fit_indices].sum())
@@ -303,8 +321,9 @@ def train(args: argparse.Namespace) -> None:
     epochs_without_improvement = 0
     patience = max(5, args.early_stopping_patience)
 
+    device_name = torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU"
     print(
-        f"Training deep classifier on {device} using {len(train_paths)} normal "
+        f"Training deep classifier on {device} ({device_name}) using {len(train_paths)} normal "
         f"clips for normalization and {len(classifier_train_indices)} labeled "
         "calibration clips..."
     )
@@ -342,15 +361,19 @@ def train(args: argparse.Namespace) -> None:
     threshold_scores = _probabilities(
         model, test_features[threshold_indices], device
     )
-    threshold = _best_threshold(test_labels[threshold_indices], threshold_scores)
+    threshold = _recall_at_minimum_precision_threshold(
+        test_labels[threshold_indices], threshold_scores, args.minimum_precision
+    )
     domain_thresholds: dict[str, float] = {}
     for domain in ("source", "target"):
         mask = np.array(
             [_domain(test_paths[index]) == domain for index in threshold_indices]
         )
         if mask.any() and np.unique(test_labels[threshold_indices][mask]).size == 2:
-            domain_thresholds[domain] = _best_threshold(
-                test_labels[threshold_indices][mask], threshold_scores[mask]
+            domain_thresholds[domain] = _recall_at_minimum_precision_threshold(
+                test_labels[threshold_indices][mask],
+                threshold_scores[mask],
+                args.minimum_precision,
             )
     evaluation_scores = _probabilities(
         model, test_features[evaluation_indices], device
@@ -378,11 +401,30 @@ def train(args: argparse.Namespace) -> None:
         "model": "supervised deep log-mel statistics classifier",
         "threshold": threshold,
         "thresholds_by_domain": domain_thresholds,
-        "threshold_optimization_metric": "F1",
-        "threshold_calibrated_on": "labeled validation subset of the calibration split",
+        "threshold_optimization_metric": (
+            f"maximum recall with precision >= {args.minimum_precision:.3f}"
+        ),
+        "minimum_precision": args.minimum_precision,
+        "threshold_calibrated_on": (
+            "labeled threshold-validation subset of the calibration split"
+        ),
         "evaluation": _metrics(evaluation_labels, evaluation_predictions),
         "threshold_validation": _metrics(
             test_labels[threshold_indices], threshold_predictions
+        ),
+        "evaluation_meets_minimum_precision": bool(
+            precision_score(
+                evaluation_labels, evaluation_predictions, zero_division=0
+            )
+            >= args.minimum_precision
+        ),
+        "threshold_validation_meets_minimum_precision": bool(
+            precision_score(
+                test_labels[threshold_indices],
+                threshold_predictions,
+                zero_division=0,
+            )
+            >= args.minimum_precision
         ),
         "normalization_normal_clips": len(train_paths),
         "labeled_calibration_training_clips": len(classifier_train_indices),
@@ -395,7 +437,10 @@ def train(args: argparse.Namespace) -> None:
     checkpoint_path = output_dir / "bearing_classifier.pt"
     torch.save(
         {
-            "state_dict": model.cpu().state_dict(),
+            "state_dict": {
+                name: tensor.detach().cpu()
+                for name, tensor in model.state_dict().items()
+            },
             "mean": torch.from_numpy(mean),
             "std": torch.from_numpy(std),
             "threshold": threshold,
@@ -448,13 +493,21 @@ def train(args: argparse.Namespace) -> None:
             )
 
     print(f"\nEvaluation (held-out labeled clips): {json.dumps(report['evaluation'])}")
+    print(
+        f"Held-out precision target met: "
+        f"{report['evaluation_meets_minimum_precision']}"
+    )
+    print(
+        f"Calibration recall at precision >= {args.minimum_precision:.2f}: "
+        f"{report['threshold_validation']['recall']:.3f}"
+    )
     print(f"Threshold: {threshold:.8f}")
     print(f"Saved model: {checkpoint_path}")
     print(f"Saved metrics: {metrics_path}")
 
 
 def predict(args: argparse.Namespace) -> None:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = _get_device(args.device)
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
     model = FeatureClassifier().to(device)
     model.load_state_dict(checkpoint["state_dict"])
@@ -465,6 +518,8 @@ def predict(args: argparse.Namespace) -> None:
     scores = _probabilities(model, normalized, device)
     threshold = float(checkpoint["threshold"])
     domain_thresholds = checkpoint["thresholds_by_domain"]
+    device_name = torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU"
+    print(f"Scoring on {device} ({device_name})")
     for path, score in zip(args.files, scores):
         path_threshold = float(domain_thresholds.get(_domain(path), threshold))
         print(
@@ -503,11 +558,29 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--early-stopping-patience", type=int, default=7)
     train_parser.add_argument("--evaluation-fraction", type=float, default=0.3)
     train_parser.add_argument("--seed", type=int, default=42)
+    train_parser.add_argument(
+        "--minimum-precision",
+        type=float,
+        default=0.7,
+        help="minimum precision required when choosing the recall-maximizing threshold",
+    )
+    train_parser.add_argument(
+        "--device",
+        choices=("auto", "cpu", "cuda"),
+        default="auto",
+        help="compute device (auto uses CUDA when available)",
+    )
     train_parser.set_defaults(handler=train)
 
     predict_parser = commands.add_parser("predict", help="score one or more WAV files")
     predict_parser.add_argument(
         "--checkpoint", type=Path, required=True, help="trained .pt model file"
+    )
+    predict_parser.add_argument(
+        "--device",
+        choices=("auto", "cpu", "cuda"),
+        default="auto",
+        help="compute device (auto uses CUDA when available)",
     )
     predict_parser.add_argument("files", type=Path, nargs="+")
     predict_parser.set_defaults(handler=predict)
@@ -518,6 +591,8 @@ def main() -> None:
     args = build_parser().parse_args()
     if args.command == "train" and not 0.1 <= args.evaluation_fraction <= 0.8:
         raise ValueError("--evaluation-fraction must be between 0.1 and 0.8.")
+    if args.command == "train" and not 0 < args.minimum_precision <= 1:
+        raise ValueError("--minimum-precision must be greater than 0 and at most 1.")
     args.handler(args)
 
 

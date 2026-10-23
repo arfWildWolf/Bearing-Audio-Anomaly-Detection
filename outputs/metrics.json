@@ -1,50 +1,53 @@
 {
   "model": "supervised deep log-mel statistics classifier",
-  "threshold": 0.10864023864269257,
+  "threshold": 0.7023867964744568,
   "thresholds_by_domain": {
-    "source": 0.10864023864269257,
-    "target": 0.12260430306196213
+    "source": 0.199027881026268,
+    "target": 0.7811817526817322
   },
-  "threshold_optimization_metric": "F1",
-  "threshold_calibrated_on": "labeled validation subset of the calibration split",
+  "threshold_optimization_metric": "maximum recall with precision >= 0.700",
+  "minimum_precision": 0.7,
+  "threshold_calibrated_on": "labeled threshold-validation subset of the calibration split",
   "evaluation": {
-    "f1": 0.7123287671232876,
-    "precision": 0.6046511627906976,
-    "recall": 0.8666666666666667,
+    "f1": 0.7142857142857143,
+    "precision": 0.7692307692307693,
+    "recall": 0.6666666666666666,
     "confusion_matrix_normal_anomaly": [
       [
-        13,
-        17
+        24,
+        6
       ],
       [
-        4,
-        26
+        10,
+        20
       ]
     ],
     "samples": 60,
     "anomalies": 30
   },
   "threshold_validation": {
-    "f1": 0.7586206896551724,
-    "precision": 0.6470588235294118,
-    "recall": 0.9166666666666666,
+    "f1": 0.76,
+    "precision": 0.7307692307692307,
+    "recall": 0.7916666666666666,
     "confusion_matrix_normal_anomaly": [
       [
-        13,
-        12
+        18,
+        7
       ],
       [
-        2,
-        22
+        5,
+        19
       ]
     ],
     "samples": 49,
     "anomalies": 24
   },
+  "evaluation_meets_minimum_precision": true,
+  "threshold_validation_meets_minimum_precision": true,
   "normalization_normal_clips": 1000,
   "labeled_calibration_training_clips": 91,
   "test_clips": 200,
   "evaluation_fraction": 0.3,
   "seed": 42,
-  "device": "cpu"
+  "device": "cuda"
 }
