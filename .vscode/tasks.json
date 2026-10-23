@@ -15,7 +15,7 @@
 			"problemMatcher": []
 		},
 		{
-			"label": "Compare Models by Cross-Validated F1",
+			"label": "Compare Models by Cross-Validated F2",
 			"type": "shell",
 			"command": "${command:python.interpreterPath}",
 			"args": [

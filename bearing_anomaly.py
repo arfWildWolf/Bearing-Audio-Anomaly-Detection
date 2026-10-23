@@ -17,6 +17,7 @@ from sklearn.metrics import (
     average_precision_score,
     balanced_accuracy_score,
     confusion_matrix,
+    fbeta_score,
     f1_score,
     matthews_corrcoef,
     precision_recall_curve,
@@ -257,6 +258,78 @@ def _probabilities(
     return np.concatenate(probabilities)
 
 
+def _fit_knn_distance_reference(
+    normal_features: np.ndarray,
+    device: torch.device,
+    neighbors: int = 10,
+) -> dict[str, object]:
+    if len(normal_features) < 2:
+        raise ValueError("kNN score normalization requires at least two normal clips.")
+    mean = normal_features.mean(axis=0)
+    std = np.maximum(normal_features.std(axis=0), 1e-6)
+    standardized = np.clip((normal_features - mean) / std, -8.0, 8.0)
+    reference = torch.from_numpy(standardized.astype(np.float32)).to(device)
+    k = min(neighbors, len(reference) - 1)
+    leave_one_out_distances: list[torch.Tensor] = []
+    with torch.no_grad():
+        for start in range(0, len(reference), 64):
+            stop = min(start + 64, len(reference))
+            distances = torch.cdist(reference[start:stop], reference)
+            row_indices = torch.arange(start, stop, device=device)
+            distances[
+                torch.arange(stop - start, device=device), row_indices
+            ] = float("inf")
+            leave_one_out_distances.append(
+                distances.topk(k, largest=False).values.mean(dim=1)
+            )
+    baseline_distance = float(
+        torch.cat(leave_one_out_distances).median().item()
+    )
+    if not np.isfinite(baseline_distance) or baseline_distance <= 0:
+        raise ValueError("Normal-reference kNN distance is not finite and positive.")
+    return {
+        "mean": torch.from_numpy(mean.astype(np.float32)).to(device),
+        "std": torch.from_numpy(std.astype(np.float32)).to(device),
+        "reference": reference,
+        "baseline_distance": baseline_distance,
+        "neighbors": k,
+        "alpha": 1.0,
+    }
+
+
+def _apply_knn_score_normalization(
+    scores: np.ndarray,
+    features: np.ndarray,
+    reference_stats: dict[str, object],
+    device: torch.device,
+) -> np.ndarray:
+    reference = reference_stats["reference"]
+    mean = reference_stats["mean"]
+    std = reference_stats["std"]
+    if not isinstance(reference, torch.Tensor) or not isinstance(mean, torch.Tensor) or not isinstance(std, torch.Tensor):
+        raise TypeError("Invalid kNN normalizer tensors.")
+    baseline_distance = float(reference_stats["baseline_distance"])
+    neighbors = int(reference_stats["neighbors"])
+    alpha = float(reference_stats["alpha"])
+    normalized_scores: list[np.ndarray] = []
+    with torch.no_grad():
+        for start in range(0, len(features), 32):
+            query = torch.from_numpy(features[start : start + 32]).to(device)
+            query = ((query - mean) / std).clamp(-8.0, 8.0)
+            distances = torch.cdist(query, reference)
+            mean_neighbor_distance = distances.topk(
+                neighbors, largest=False
+            ).values.mean(dim=1)
+            distance_ratio = (mean_neighbor_distance / baseline_distance).clamp_min(1e-4)
+            raw_scores = torch.from_numpy(
+                scores[start : start + 32].astype(np.float32)
+            ).to(device).clamp(1e-6, 1.0 - 1e-6)
+            score_logits = torch.logit(raw_scores)
+            adjusted_logits = score_logits + alpha * torch.log(distance_ratio)
+            normalized_scores.append(torch.sigmoid(adjusted_logits).cpu().numpy())
+    return np.concatenate(normalized_scores)
+
+
 def _fit_rbf_svm(
     labeled_features: np.ndarray,
     labels: np.ndarray,
@@ -288,23 +361,32 @@ def _fit_rbf_svm(
     ).to(device)
 
 
-def _maximum_f1_threshold(
-    labels: np.ndarray, scores: np.ndarray
+def _maximum_fbeta_threshold(
+    labels: np.ndarray, scores: np.ndarray, beta: float
 ) -> tuple[float, int]:
     candidates = np.concatenate(
         [np.nextafter(np.max(scores), np.inf).reshape(1), np.unique(scores)]
     )
-    candidates_by_f1: list[tuple[float, int, float]] = []
+    candidates_by_fbeta: list[tuple[float, int, float]] = []
     for threshold in candidates:
         predictions = scores >= threshold
         false_positives = int(np.count_nonzero(predictions & (labels == 0)))
         true_positives = int(np.count_nonzero(predictions & (labels == 1)))
         false_negatives = int(np.count_nonzero(~predictions & (labels == 1)))
-        denominator = 2 * true_positives + false_positives + false_negatives
-        f1 = 2 * true_positives / denominator if denominator else 0.0
-        candidates_by_f1.append((f1, false_positives, float(threshold)))
-    f1, false_positives, threshold = max(
-        candidates_by_f1, key=lambda result: (result[0], -result[1], result[2])
+        beta_squared = beta**2
+        denominator = (
+            (1 + beta_squared) * true_positives
+            + beta_squared * false_negatives
+            + false_positives
+        )
+        fbeta = (
+            (1 + beta_squared) * true_positives / denominator
+            if denominator
+            else 0.0
+        )
+        candidates_by_fbeta.append((fbeta, false_positives, float(threshold)))
+    fbeta, false_positives, threshold = max(
+        candidates_by_fbeta, key=lambda result: (result[0], -result[1], result[2])
     )
     return threshold, false_positives
 
@@ -313,16 +395,19 @@ def _calibrate_thresholds(
     paths: list[Path],
     labels: np.ndarray,
     scores: np.ndarray,
+    beta: float,
 ) -> tuple[float, dict[str, float], int]:
-    overall_threshold, overall_false_positives = _maximum_f1_threshold(labels, scores)
+    overall_threshold, overall_false_positives = _maximum_fbeta_threshold(
+        labels, scores, beta
+    )
     thresholds: dict[str, float] = {}
     domain_false_positives = 0
     for domain in ("source", "target"):
         mask = np.array([_domain(path) == domain for path in paths])
         if not mask.any() or not np.any(labels[mask] == 0) or not np.any(labels[mask] == 1):
             continue
-        thresholds[domain], false_positives = _maximum_f1_threshold(
-            labels[mask], scores[mask]
+        thresholds[domain], false_positives = _maximum_fbeta_threshold(
+            labels[mask], scores[mask], beta
         )
         domain_false_positives += false_positives
     return (
@@ -409,6 +494,7 @@ def _metrics(
     has_both_classes = np.unique(labels).size == 2
     return {
         "f1": float(f1_score(labels, predictions, zero_division=0)),
+        "f2": float(fbeta_score(labels, predictions, beta=2, zero_division=0)),
         "harmonic_mean_precision_recall": float(harmonic_mean),
         "precision": precision,
         "recall": recall,
@@ -589,23 +675,27 @@ def train(args: argparse.Namespace) -> dict[str, object]:
     )
     device = _get_device(args.device)
     architecture = args.architecture
+    use_knn_normalization = architecture.endswith("_knn")
+    base_architecture = architecture.removesuffix("_knn")
     base_architecture = (
-        "large" if architecture in ("large", "large_pruned") else "small"
+        "large" if base_architecture in ("large", "large_pruned") else "small"
     )
+    model_architecture = architecture.removesuffix("_knn")
     prune_keep_fraction = (
-        args.prune_keep_fraction if architecture == "large_pruned" else None
+        args.prune_keep_fraction if model_architecture == "large_pruned" else None
     )
     normal_features = (
         _prepare_model_features(train_features, base_architecture)
-        if architecture != "small_calibration_only"
+        if model_architecture != "small_calibration_only"
         else np.empty((0, N_MELS * 10), dtype=np.float32)
     )
+    knn_reference_features = _prepare_model_features(train_features, base_architecture)
     test_model_features = _prepare_model_features(test_features, base_architecture)
     fit_features = test_model_features[classifier_train_indices]
     fit_labels = test_labels[classifier_train_indices]
 
     device_name = torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU"
-    if architecture == "rbf_svm":
+    if model_architecture == "rbf_svm":
         print(
             f"Training {architecture} classifier on CPU and scoring on {device} "
             f"({device_name}) with {len(normal_features)} normal clips and "
@@ -633,22 +723,50 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         )
     test_features = test_model_features
     hidden_dims = model.hidden_dims if isinstance(model, FeatureClassifier) else ()
+    knn_reference_stats = (
+        _fit_knn_distance_reference(knn_reference_features, device)
+        if use_knn_normalization
+        else None
+    )
     threshold_scores = _probabilities(
         model, test_features[threshold_indices], device
     )
+    evaluation_scores = _probabilities(
+        model, test_features[evaluation_indices], device
+    )
+    classifier_train_scores = _probabilities(
+        model, test_features[classifier_train_indices], device
+    )
+    if knn_reference_stats is not None:
+        threshold_scores = _apply_knn_score_normalization(
+            threshold_scores,
+            test_features[threshold_indices],
+            knn_reference_stats,
+            device,
+        )
+        evaluation_scores = _apply_knn_score_normalization(
+            evaluation_scores,
+            test_features[evaluation_indices],
+            knn_reference_stats,
+            device,
+        )
+        classifier_train_scores = _apply_knn_score_normalization(
+            classifier_train_scores,
+            test_features[classifier_train_indices],
+            knn_reference_stats,
+            device,
+        )
     threshold, domain_thresholds, calibration_false_positives = _calibrate_thresholds(
         [test_paths[index] for index in threshold_indices],
         test_labels[threshold_indices],
         threshold_scores,
+        args.threshold_beta,
     )
     threshold_validation_thresholds = np.array(
         [
             domain_thresholds.get(_domain(test_paths[index]), threshold)
             for index in threshold_indices
         ]
-    )
-    evaluation_scores = _probabilities(
-        model, test_features[evaluation_indices], device
     )
     evaluation_labels = test_labels[evaluation_indices]
     evaluation_thresholds = np.array(
@@ -669,7 +787,15 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         "hidden_dims": list(hidden_dims),
         "threshold": threshold,
         "thresholds_by_domain": domain_thresholds,
-        "threshold_optimization_metric": "maximum F1 on threshold-validation clips per domain",
+        "threshold_optimization_metric": (
+            "maximum F-beta on threshold-validation clips per domain"
+        ),
+        "threshold_optimization_beta": args.threshold_beta,
+        "score_normalization": (
+            "k-nearest-normal distance odds adjustment"
+            if use_knn_normalization
+            else "none"
+        ),
         "threshold_calibrated_on": (
             "labeled threshold-validation subset of the calibration split"
         ),
@@ -686,8 +812,10 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         "evaluation_fraction": args.evaluation_fraction,
         "seed": args.seed,
         "device": str(device),
-        "classifier_fit_device": "cpu" if architecture == "rbf_svm" else str(device),
-        "score_is_calibrated_probability": architecture != "rbf_svm",
+        "classifier_fit_device": "cpu" if model_architecture == "rbf_svm" else str(device),
+        "score_is_calibrated_probability": (
+            model_architecture != "rbf_svm" and not use_knn_normalization
+        ),
     }
     report["calibration_false_positives_at_threshold"] = (
         calibration_false_positives
@@ -707,6 +835,18 @@ def train(args: argparse.Namespace) -> dict[str, object]:
             "std": torch.from_numpy(std),
             "threshold": threshold,
             "thresholds_by_domain": domain_thresholds,
+            "knn_normalizer": (
+                {
+                    "mean": knn_reference_stats["mean"].detach().cpu(),
+                    "std": knn_reference_stats["std"].detach().cpu(),
+                    "reference": knn_reference_stats["reference"].detach().cpu(),
+                    "baseline_distance": knn_reference_stats["baseline_distance"],
+                    "neighbors": knn_reference_stats["neighbors"],
+                    "alpha": knn_reference_stats["alpha"],
+                }
+                if knn_reference_stats is not None
+                else None
+            ),
             "sample_rate": SAMPLE_RATE,
             "n_mels": N_MELS,
             "n_frames": N_FRAMES,
@@ -718,9 +858,7 @@ def train(args: argparse.Namespace) -> dict[str, object]:
 
     all_scores = np.empty(len(test_paths), dtype=np.float64)
     all_scores[threshold_indices] = threshold_scores
-    all_scores[classifier_train_indices] = _probabilities(
-        model, test_features[classifier_train_indices], device
-    )
+    all_scores[classifier_train_indices] = classifier_train_scores
     all_scores[evaluation_indices] = evaluation_scores
     split_by_index = {
         int(index): "classifier_training" for index in classifier_train_indices
@@ -833,6 +971,7 @@ def _aggregate_fold_metrics(folds: list[dict[str, object]]) -> dict[str, object]
     normal_count = sample_count - anomaly_count
     false_negatives = anomaly_count - true_positives
     f1_denominator = 2 * true_positives + false_positives + false_negatives
+    f2_denominator = 5 * true_positives + 4 * false_negatives + false_positives
     mean_fold_metrics = {
         f"mean_fold_{name}": float(
             np.mean(
@@ -856,6 +995,10 @@ def _aggregate_fold_metrics(folds: list[dict[str, object]]) -> dict[str, object]
     }
     return {
         "folds": len(folds),
+        "mean_fold_f2": float(
+            np.mean([float(fold["metrics"]["f2"]) for fold in folds])
+        ),
+        "pooled_f2": 5 * true_positives / f2_denominator if f2_denominator else 0.0,
         "mean_fold_f1": float(
             np.mean([float(fold["metrics"]["f1"]) for fold in folds])
         ),
@@ -914,15 +1057,25 @@ def compare_models(args: argparse.Namespace) -> None:
         "small_calibration_only": (
             "small",
             np.empty((0, N_MELS * 10), dtype=np.float32),
+            False,
         ),
-        "small": ("small", normal_features),
-        "large": ("large", normal_features),
-        "rbf_svm": ("rbf_svm", normal_features),
+        "small_calibration_only_knn": (
+            "small",
+            np.empty((0, N_MELS * 10), dtype=np.float32),
+            True,
+        ),
+        "small": ("small", normal_features, False),
+        "small_knn": ("small", normal_features, True),
+        "large": ("large", normal_features, False),
+        "large_knn": ("large", normal_features, True),
+        "rbf_svm": ("rbf_svm", normal_features, False),
+        "rbf_svm_knn": ("rbf_svm", normal_features, True),
     }
     fold_results: dict[str, list[dict[str, object]]] = {
         name: [] for name in architecture_specs
     }
     fp_rows: list[tuple[str, int, str, str, float, float]] = []
+    knn_reference_stats = _fit_knn_distance_reference(normal_features, device)
 
     for fold_number, (fold_train_relative, fold_eval_relative) in enumerate(
         splitter.split(calibration_indices, strata[calibration_indices]), start=1
@@ -941,8 +1094,12 @@ def compare_models(args: argparse.Namespace) -> None:
             f"{len(classifier_indices)} fit, {len(threshold_indices)} threshold, "
             f"{len(fold_eval_indices)} validation clips"
         )
-        for candidate_name, (architecture, candidate_normal_features) in architecture_specs.items():
-            if architecture == "rbf_svm":
+        for candidate_name, (
+            architecture,
+            candidate_normal_features,
+            use_knn_normalization,
+        ) in architecture_specs.items():
+            if architecture.removesuffix("_knn") == "rbf_svm":
                 model = _fit_rbf_svm(
                     features[classifier_indices],
                     labels[classifier_indices],
@@ -965,12 +1122,26 @@ def compare_models(args: argparse.Namespace) -> None:
             calibration_scores = _probabilities(
                 model, features[threshold_indices], device
             )
+            eval_scores = _probabilities(model, features[fold_eval_indices], device)
+            if use_knn_normalization:
+                calibration_scores = _apply_knn_score_normalization(
+                    calibration_scores,
+                    features[threshold_indices],
+                    knn_reference_stats,
+                    device,
+                )
+                eval_scores = _apply_knn_score_normalization(
+                    eval_scores,
+                    features[fold_eval_indices],
+                    knn_reference_stats,
+                    device,
+                )
             threshold, domain_thresholds, calibration_fp_count = _calibrate_thresholds(
                 [labeled_paths[index] for index in threshold_indices],
                 labels[threshold_indices],
                 calibration_scores,
+                args.threshold_beta,
             )
-            eval_scores = _probabilities(model, features[fold_eval_indices], device)
             eval_thresholds = np.array(
                 [
                     domain_thresholds.get(_domain(labeled_paths[index]), threshold)
@@ -1010,7 +1181,7 @@ def compare_models(args: argparse.Namespace) -> None:
                         )
                     )
             print(
-                f"  {candidate_name}: F1={metrics['f1']:.3f}, "
+                f"  {candidate_name}: F2={metrics['f2']:.3f}, "
                 f"FP={metrics['false_positives']}, "
                 f"threshold-subset FP={calibration_fp_count}"
             )
@@ -1019,41 +1190,44 @@ def compare_models(args: argparse.Namespace) -> None:
         name: _aggregate_fold_metrics(results)
         for name, results in fold_results.items()
     }
-    small_candidates = ("small_calibration_only", "small")
+    small_candidates = (
+        "small_calibration_only",
+        "small_calibration_only_knn",
+        "small",
+        "small_knn",
+    )
     baseline_name = max(
         small_candidates,
         key=lambda name: (
-            float(summaries[name]["pooled_f1"]),
+            float(summaries[name]["pooled_f2"]),
             -int(summaries[name]["false_positives"]),
         ),
     )
     small_folds = fold_results[baseline_name]
-    large_folds = fold_results["large"]
-    large_f1_wins = sum(
-        float(large["metrics"]["f1"]) > float(small["metrics"]["f1"])
-        for small, large in zip(small_folds, large_folds)
-    )
     required_wins = int(np.ceil(0.8 * folds))
-    large_consistent = (
-        large_f1_wins >= required_wins
-        and float(summaries["large"]["pooled_f1"])
-        > float(summaries[baseline_name]["pooled_f1"])
-    )
-    svm_folds = fold_results["rbf_svm"]
-    svm_f1_wins = sum(
-        float(svm["metrics"]["f1"]) > float(small["metrics"]["f1"])
-        for small, svm in zip(small_folds, svm_folds)
-    )
-    svm_consistent = (
-        svm_f1_wins >= required_wins
-        and float(summaries["rbf_svm"]["pooled_f1"])
-        > float(summaries[baseline_name]["pooled_f1"])
-    )
+    model_wins: dict[str, int] = {}
+    consistent_candidates: list[str] = []
+    for candidate_name in ("large", "large_knn", "rbf_svm", "rbf_svm_knn"):
+        wins = sum(
+            float(candidate["metrics"]["f2"]) > float(small["metrics"]["f2"])
+            for small, candidate in zip(small_folds, fold_results[candidate_name])
+        )
+        model_wins[candidate_name] = wins
+        if (
+            wins >= required_wins
+            and float(summaries[candidate_name]["pooled_f2"])
+            > float(summaries[baseline_name]["pooled_f2"])
+        ):
+            consistent_candidates.append(candidate_name)
+    large_consistent = "large" in consistent_candidates
+    svm_consistent = "rbf_svm" in consistent_candidates
 
     pruned_wins = False
     pruned_results: list[dict[str, object]] = []
+    pruned_f2_wins: int | None = None
     if large_consistent:
         print("Large MLP improved consistently; evaluating structured-pruned variant.")
+        use_knn_for_pruned = baseline_name.endswith("_knn")
         for fold_number, (fold_train_relative, fold_eval_relative) in enumerate(
             splitter.split(calibration_indices, strata[calibration_indices]), start=1
         ):
@@ -1081,12 +1255,26 @@ def compare_models(args: argparse.Namespace) -> None:
             calibration_scores = _probabilities(
                 model, features[threshold_indices], device
             )
+            eval_scores = _probabilities(model, features[fold_eval_indices], device)
+            if use_knn_for_pruned:
+                calibration_scores = _apply_knn_score_normalization(
+                    calibration_scores,
+                    features[threshold_indices],
+                    knn_reference_stats,
+                    device,
+                )
+                eval_scores = _apply_knn_score_normalization(
+                    eval_scores,
+                    features[fold_eval_indices],
+                    knn_reference_stats,
+                    device,
+                )
             threshold, domain_thresholds, calibration_fp_count = _calibrate_thresholds(
                 [labeled_paths[index] for index in threshold_indices],
                 labels[threshold_indices],
                 calibration_scores,
+                args.threshold_beta,
             )
-            eval_scores = _probabilities(model, features[fold_eval_indices], device)
             eval_thresholds = np.array(
                 [
                     domain_thresholds.get(_domain(labeled_paths[index]), threshold)
@@ -1124,29 +1312,36 @@ def compare_models(args: argparse.Namespace) -> None:
                         )
                     )
             print(
-                f"  large_pruned: F1={metrics['f1']:.3f}, "
+                f"  large_pruned: F2={metrics['f2']:.3f}, "
                 f"FP={metrics['false_positives']}"
             )
-        summaries["large_pruned"] = _aggregate_fold_metrics(pruned_results)
-        pruned_f1_wins = sum(
-            float(pruned["metrics"]["f1"]) > float(small["metrics"]["f1"])
+        pruned_name = "large_pruned_knn" if use_knn_for_pruned else "large_pruned"
+        summaries[pruned_name] = _aggregate_fold_metrics(pruned_results)
+        pruned_f2_wins = sum(
+            float(pruned["metrics"]["f2"]) > float(small["metrics"]["f2"])
             for small, pruned in zip(small_folds, pruned_results)
         )
         pruned_wins = (
-            pruned_f1_wins >= required_wins
-            and float(summaries["large_pruned"]["pooled_f1"])
-            > float(summaries[baseline_name]["pooled_f1"])
+            pruned_f2_wins >= required_wins
+            and float(summaries[pruned_name]["pooled_f2"])
+            > float(summaries[baseline_name]["pooled_f2"])
         )
 
     eligible_candidates = [baseline_name]
     if large_consistent:
-        eligible_candidates.append("large_pruned" if pruned_wins else "large")
+        eligible_candidates.append(
+            pruned_name if pruned_wins else "large"
+        )
+    if "large_knn" in consistent_candidates:
+        eligible_candidates.append("large_knn")
     if svm_consistent:
         eligible_candidates.append("rbf_svm")
+    if "rbf_svm_knn" in consistent_candidates:
+        eligible_candidates.append("rbf_svm_knn")
     selected_architecture = max(
         eligible_candidates,
         key=lambda name: (
-            float(summaries[name]["pooled_f1"]),
+            float(summaries[name]["pooled_f2"]),
             -int(summaries[name]["false_positives"]),
         ),
     )
@@ -1156,17 +1351,29 @@ def compare_models(args: argparse.Namespace) -> None:
             "thresholds calibrated independently per fold"
         ),
         "folds": folds,
-        "threshold_optimization_metric": "F1, calibrated on each fold's threshold subset",
-        "model_selection_metric": "pooled cross-validated F1",
-        "large_model_f1_wins": large_f1_wins,
-        "large_model_required_f1_wins": required_wins,
+        "threshold_optimization_metric": (
+            f"F-beta (beta={args.threshold_beta}), calibrated on each fold's "
+            "threshold subset"
+        ),
+        "model_selection_metric": "pooled cross-validated F2",
+        "threshold_beta": args.threshold_beta,
+        "knn_score_normalization": (
+            "odds adjusted by mean distance to 10 nearest normal training clips"
+        ),
+        "large_model_f2_wins": model_wins["large"],
+        "required_consistent_fold_wins": required_wins,
         "large_model_consistently_better": large_consistent,
-        "rbf_svm_f1_wins": svm_f1_wins,
-        "rbf_svm_required_f1_wins": required_wins,
+        "large_knn_f2_wins": model_wins["large_knn"],
+        "large_knn_consistently_better": "large_knn" in consistent_candidates,
+        "rbf_svm_f2_wins": model_wins["rbf_svm"],
         "rbf_svm_consistently_better": svm_consistent,
+        "rbf_svm_knn_f2_wins": model_wins["rbf_svm_knn"],
+        "rbf_svm_knn_consistently_better": (
+            "rbf_svm_knn" in consistent_candidates
+        ),
         "best_small_training_strategy": baseline_name,
-        "pruned_model_f1_wins": (
-            pruned_f1_wins if large_consistent else None
+        "pruned_model_f2_wins": (
+            pruned_f2_wins if large_consistent else None
         ),
         "pruning_improvement_survives": pruned_wins if large_consistent else None,
         "selected_architecture": selected_architecture,
@@ -1217,12 +1424,13 @@ def predict(args: argparse.Namespace) -> None:
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
     architecture = checkpoint.get("architecture", "small")
     hidden_dims = tuple(checkpoint.get("hidden_dims", ARCHITECTURES["small"]))
+    model_architecture = architecture.removesuffix("_knn")
     base_architecture = (
         "large"
-        if architecture in ("large", "large_pruned")
+        if model_architecture in ("large", "large_pruned")
         else "small"
     )
-    if architecture == "rbf_svm":
+    if model_architecture == "rbf_svm":
         state_dict = checkpoint["state_dict"]
         model = RbfSVMScorer(
             state_dict["support_vectors"].numpy(),
@@ -1238,6 +1446,17 @@ def predict(args: argparse.Namespace) -> None:
     std = checkpoint["std"].numpy()
     normalized = _prepare_model_features(_normalize(features, mean, std), base_architecture)
     scores = _probabilities(model, normalized, device)
+    knn_normalizer = checkpoint.get("knn_normalizer")
+    if knn_normalizer is not None:
+        stats: dict[str, object] = {
+            "mean": knn_normalizer["mean"].to(device),
+            "std": knn_normalizer["std"].to(device),
+            "reference": knn_normalizer["reference"].to(device),
+            "baseline_distance": knn_normalizer["baseline_distance"],
+            "neighbors": knn_normalizer["neighbors"],
+            "alpha": knn_normalizer["alpha"],
+        }
+        scores = _apply_knn_score_normalization(scores, normalized, stats, device)
     threshold = float(checkpoint["threshold"])
     domain_thresholds = checkpoint.get("thresholds_by_domain", {})
     device_name = torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU"
@@ -1249,9 +1468,13 @@ def predict(args: argparse.Namespace) -> None:
             "threshold": path_threshold,
             "prediction": "anomaly" if score >= path_threshold else "normal",
         }
-        if architecture == "rbf_svm":
+        if model_architecture == "rbf_svm" or knn_normalizer is not None:
             result["anomaly_score"] = float(score)
-            result["score_kind"] = "sigmoid-transformed SVM margin (not calibrated probability)"
+            result["score_kind"] = (
+                "kNN distance-adjusted anomaly score"
+                if knn_normalizer is not None
+                else "sigmoid-transformed SVM margin (not calibrated probability)"
+            )
         else:
             result["anomaly_probability"] = float(score)
         print(json.dumps(result))
@@ -1285,15 +1508,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--architecture",
         choices=(
             "small",
+            "small_knn",
             "small_calibration_only",
+            "small_calibration_only_knn",
             "large",
+            "large_knn",
             "large_pruned",
+            "large_pruned_knn",
             "rbf_svm",
+            "rbf_svm_knn",
         ),
         default="small",
-        help="classifier size; compare command selects this automatically",
+        help="classifier strategy with optional kNN score normalization",
     )
     train_parser.add_argument("--prune-keep-fraction", type=float, default=0.7)
+    train_parser.add_argument(
+        "--threshold-beta",
+        type=float,
+        default=2.0,
+        help="F-beta used for threshold calibration; beta above 1 favors recall",
+    )
     train_parser.add_argument(
         "--device",
         choices=("auto", "cpu", "cuda"),
@@ -1303,7 +1537,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.set_defaults(handler=train)
 
     compare_parser = commands.add_parser(
-        "compare", help="compare model training strategies by cross-validated F1"
+        "compare", help="compare model strategies by cross-validated F2"
     )
     compare_parser.add_argument(
         "--data-dir",
@@ -1324,6 +1558,12 @@ def build_parser() -> argparse.ArgumentParser:
     compare_parser.add_argument("--folds", type=int, default=5)
     compare_parser.add_argument("--threshold-fraction", type=float, default=0.25)
     compare_parser.add_argument("--prune-keep-fraction", type=float, default=0.7)
+    compare_parser.add_argument(
+        "--threshold-beta",
+        type=float,
+        default=2.0,
+        help="F-beta used for threshold calibration; beta above 1 favors recall",
+    )
     compare_parser.add_argument(
         "--device",
         choices=("auto", "cpu", "cuda"),
@@ -1354,6 +1594,8 @@ def main() -> None:
         raise ValueError("--folds must be at least 2.")
     if args.command == "compare" and not 0.1 <= args.threshold_fraction <= 0.5:
         raise ValueError("--threshold-fraction must be between 0.1 and 0.5.")
+    if args.command in ("train", "compare") and args.threshold_beta <= 0:
+        raise ValueError("--threshold-beta must be greater than 0.")
     if args.command in ("train", "compare") and not 0.1 <= args.prune_keep_fraction < 1:
         raise ValueError("--prune-keep-fraction must be in [0.1, 1).")
     args.handler(args)

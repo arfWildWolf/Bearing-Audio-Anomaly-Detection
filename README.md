@@ -37,32 +37,37 @@ bearing/
 python bearing_anomaly.py train
 ```
 
-To compare training with and without the extra normal training recordings, as
-well as the larger classifier, by cross-validated F1, use:
+To compare classifier and score-normalization strategies using recall-weighted
+F2, use:
 
 ```powershell
 python bearing_anomaly.py compare --device cuda
 ```
 
-This compares four candidates on stratified folds drawn only from the
-calibration partition and keeps the final evaluation partition untouched.
-The candidates are the small MLP with and without the extra normal recordings,
-the larger MLP, and an RBF support-vector machine. MLP training and scoring
-use CUDA when requested; the scikit-learn SVM fit runs locally on CPU and its
-scoring is performed on the selected device. Thresholds are selected to
-maximize F1 on a separate calibration subset, with
-separate thresholds for `source` and `target` when both classes are represented
-in that domain. The small-model strategy with the highest pooled cross-validated
-F1 is selected as the baseline (breaking ties toward fewer false positives).
-The larger MLP and SVM are selected only if each improves F1 over the baseline
-in at least 80% of folds and improves pooled F1. Only when the larger MLP meets
-that rule is a 30%-width structured-pruned model evaluated; pruning is selected
-only if its F1 improvement over the small baseline also survives in at least
-80% of folds and improves pooled F1. The best qualifying candidate is trained
-and evaluated on the reserved holdout. No false-positive-rate cap is applied
-in this F1-optimization mode; precision, recall, and false positives remain
-reported for transparency. The SVM's sigmoid-transformed decision score is
-monotonic but is not a calibrated probability.
+The comparison uses stratified folds drawn only from the calibration partition;
+the final evaluation partition remains untouched. Candidates include the small
+MLP with and without the extra normal training clips, the larger MLP, and an
+RBF support-vector machine. Each is evaluated with both raw scores and
+k-nearest-normal distance-adjusted scores. The adjustment standardizes feature
+dimensions from normal training clips, measures each clip's mean distance to
+its 10 nearest normal training clips, and multiplies the model's anomaly odds
+by that distance relative to the leave-one-out median normal distance. The MLP
+and distance adjustment run on the selected device; SVM fitting runs locally
+on CPU.
+
+Thresholds are selected to maximize F-beta on a separate calibration subset,
+with `--threshold-beta 2` by default to favor recall (a lower decision boundary
+can increase false positives). Set beta to `1` for ordinary F1 threshold
+selection. Thresholds are separate for `source` and `target` when both classes
+are represented in the calibration domain. The small-model strategy with
+highest pooled cross-validated F2 is the baseline, with ties favoring fewer
+false positives. Larger MLP/SVM candidates must improve F2 in at least 80% of
+folds and improve pooled F2 to qualify. If the raw larger MLP qualifies, a
+30%-width structured-pruned candidate is also tested. The best qualifying
+strategy is then trained and evaluated on the reserved holdout. There is no
+false-positive-rate cap; precision, recall, and false positives are reported
+for transparency. The SVM's sigmoid-transformed score is not a calibrated
+probability.
 
 The VS Code task **Train Bearing Anomaly Detector** explicitly requests CUDA.
 The CLI defaults to `--device auto`, which uses CUDA when available; use
@@ -72,8 +77,10 @@ or `--device cpu` to force CPU execution.
 The default run uses normal clips from `bearing/train`. It splits labeled files
 in `bearing/test` into a calibration subset and a held-out evaluation subset.
 Some calibration clips train the classifier; a separate calibration portion
-sets thresholds to maximize F1, with separate thresholds for the `source` and
-`target` domains when identified in the filename. Threshold selection uses
+sets thresholds to maximize F-beta (beta 2 by default), with separate
+thresholds for the `source` and `target` domains when identified in the
+filename. For kNN-normalized architectures, scores are adjusted by distance to
+normal training examples before thresholding. Threshold selection uses
 calibration labels only; held-out evaluation labels do not affect the model or
 threshold. The report includes thresholded metrics (accuracy, balanced accuracy,
 precision, recall/sensitivity, specificity, negative predictive value,
@@ -84,9 +91,9 @@ precision and recall is mathematically F1, so those two values should agree
 apart from rounding. AUC metrics evaluate score ranking and do not depend on
 the selected decision threshold. Metrics are reported for both threshold
 validation and held-out evaluation, and may differ because of sampling
-variation. F1 optimization does not guarantee a low false-positive rate. This
-is a supervised detector because anomaly examples from the calibration split
-are used during training. Set `--seed` to reproduce a run.
+variation. Recall-weighted F-beta does not guarantee a low false-positive rate.
+This is a supervised detector because anomaly examples from the calibration
+split are used during training. Set `--seed` to reproduce a run.
 
 The trained model and evaluation artifacts are saved under `outputs/`:
 
