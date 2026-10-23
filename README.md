@@ -44,19 +44,25 @@ well as the larger classifier, by cross-validated F1, use:
 python bearing_anomaly.py compare --device cuda
 ```
 
-This compares three candidates on stratified folds drawn only from the
+This compares four candidates on stratified folds drawn only from the
 calibration partition and keeps the final evaluation partition untouched.
-Thresholds are selected to maximize F1 on a separate calibration subset, with
+The candidates are the small MLP with and without the extra normal recordings,
+the larger MLP, and an RBF support-vector machine. MLP training and scoring
+use CUDA when requested; the scikit-learn SVM fit runs locally on CPU and its
+scoring is performed on the selected device. Thresholds are selected to
+maximize F1 on a separate calibration subset, with
 separate thresholds for `source` and `target` when both classes are represented
 in that domain. The small-model strategy with the highest pooled cross-validated
 F1 is selected as the baseline (breaking ties toward fewer false positives).
-The larger model is selected only if it improves F1 in at least 80% of folds
-and improves pooled F1. Only then is a 30%-width structured-pruned model
-evaluated; pruning is selected only if its F1 improvement over that baseline
-also survives in at least 80% of folds and improves pooled F1. No false-positive
-rate cap is applied in this F1-optimization mode; precision, recall, and false
-positives remain reported for transparency. The selected model is then trained
-and evaluated on the reserved holdout.
+The larger MLP and SVM are selected only if each improves F1 over the baseline
+in at least 80% of folds and improves pooled F1. Only when the larger MLP meets
+that rule is a 30%-width structured-pruned model evaluated; pruning is selected
+only if its F1 improvement over the small baseline also survives in at least
+80% of folds and improves pooled F1. The best qualifying candidate is trained
+and evaluated on the reserved holdout. No false-positive-rate cap is applied
+in this F1-optimization mode; precision, recall, and false positives remain
+reported for transparency. The SVM's sigmoid-transformed decision score is
+monotonic but is not a calibrated probability.
 
 The VS Code task **Train Bearing Anomaly Detector** explicitly requests CUDA.
 The CLI defaults to `--device auto`, which uses CUDA when available; use

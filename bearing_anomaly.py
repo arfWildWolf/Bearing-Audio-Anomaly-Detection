@@ -21,6 +21,7 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import train_test_split
 from sklearn.model_selection import StratifiedKFold
+from sklearn.svm import SVC
 from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
@@ -161,6 +162,37 @@ class FeatureClassifier(nn.Module):
         return self.classifier(values).squeeze(1)
 
 
+class RbfSVMScorer(nn.Module):
+    def __init__(
+        self,
+        support_vectors: np.ndarray,
+        dual_coefficients: np.ndarray,
+        intercept: float,
+        gamma: float,
+    ) -> None:
+        super().__init__()
+        self.register_buffer(
+            "support_vectors", torch.from_numpy(support_vectors.astype(np.float32))
+        )
+        self.register_buffer(
+            "dual_coefficients",
+            torch.from_numpy(dual_coefficients.astype(np.float32)),
+        )
+        self.register_buffer("intercept", torch.tensor([intercept], dtype=torch.float32))
+        self.register_buffer("gamma", torch.tensor([gamma], dtype=torch.float32))
+
+    def forward(self, values: torch.Tensor) -> torch.Tensor:
+        values_squared = values.square().sum(dim=1, keepdim=True)
+        support_squared = self.support_vectors.square().sum(dim=1).unsqueeze(0)
+        distances_squared = (
+            values_squared
+            + support_squared
+            - 2 * values @ self.support_vectors.T
+        ).clamp_min_(0)
+        kernels = torch.exp(-self.gamma * distances_squared)
+        return (kernels @ self.dual_coefficients.unsqueeze(1)).squeeze(1) + self.intercept
+
+
 ARCHITECTURES: dict[str, tuple[int, ...]] = {
     "small": (256, 64),
     "large": (512, 256, 128),
@@ -201,13 +233,13 @@ def _prune_mlp(model: FeatureClassifier, keep_fraction: float) -> FeatureClassif
 
 
 def _prepare_model_features(raw: np.ndarray, architecture: str) -> np.ndarray:
-    if architecture not in ARCHITECTURES:
+    if architecture not in ARCHITECTURES and architecture != "rbf_svm":
         raise ValueError(f"Unknown model architecture: {architecture}")
     return _summarize_spectrograms(raw)
 
 
 def _probabilities(
-    model: FeatureClassifier, features: np.ndarray, device: torch.device
+    model: nn.Module, features: np.ndarray, device: torch.device
 ) -> np.ndarray:
     model.eval()
     probabilities: list[np.ndarray] = []
@@ -218,6 +250,37 @@ def _probabilities(
                 torch.sigmoid(model(batch)).cpu().numpy()
             )
     return np.concatenate(probabilities)
+
+
+def _fit_rbf_svm(
+    labeled_features: np.ndarray,
+    labels: np.ndarray,
+    normal_features: np.ndarray,
+    device: torch.device,
+) -> RbfSVMScorer:
+    features = np.concatenate([normal_features, labeled_features], axis=0)
+    combined_labels = np.concatenate(
+        [np.zeros(len(normal_features), dtype=np.int64), labels]
+    )
+    estimator = SVC(
+        C=1.0,
+        kernel="rbf",
+        gamma="scale",
+        class_weight="balanced",
+    )
+    estimator.fit(features, combined_labels)
+    feature_variance = float(features.var())
+    gamma = (
+        1.0 / (features.shape[1] * feature_variance)
+        if feature_variance > 0
+        else 1.0
+    )
+    return RbfSVMScorer(
+        estimator.support_vectors_,
+        estimator.dual_coef_[0],
+        float(estimator.intercept_[0]),
+        gamma,
+    ).to(device)
 
 
 def _maximum_f1_threshold(
@@ -489,26 +552,34 @@ def train(args: argparse.Namespace) -> dict[str, object]:
     fit_labels = test_labels[classifier_train_indices]
 
     device_name = torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU"
-    print(
-        f"Training {architecture} classifier on {device} ({device_name}) with "
-        f"{len(normal_features)} normal clips and "
-        f"{len(classifier_train_indices)} labeled calibration clips..."
-    )
-    model = _fit_classifier(
-        fit_features,
-        fit_labels,
-        normal_features,
-        base_architecture,
-        device,
-        args.seed,
-        args.epochs,
-        args.batch_size,
-        args.learning_rate,
-        max(5, args.early_stopping_patience),
-        prune_keep_fraction,
-    )
+    if architecture == "rbf_svm":
+        print(
+            f"Training {architecture} classifier on CPU and scoring on {device} "
+            f"({device_name}) with {len(normal_features)} normal clips and "
+            f"{len(classifier_train_indices)} labeled calibration clips..."
+        )
+        model = _fit_rbf_svm(fit_features, fit_labels, normal_features, device)
+    else:
+        print(
+            f"Training {architecture} classifier on {device} ({device_name}) with "
+            f"{len(normal_features)} normal clips and "
+            f"{len(classifier_train_indices)} labeled calibration clips..."
+        )
+        model = _fit_classifier(
+            fit_features,
+            fit_labels,
+            normal_features,
+            base_architecture,
+            device,
+            args.seed,
+            args.epochs,
+            args.batch_size,
+            args.learning_rate,
+            max(5, args.early_stopping_patience),
+            prune_keep_fraction,
+        )
     test_features = test_model_features
-    hidden_dims = model.hidden_dims
+    hidden_dims = model.hidden_dims if isinstance(model, FeatureClassifier) else ()
     threshold_scores = _probabilities(
         model, test_features[threshold_indices], device
     )
@@ -560,20 +631,23 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         "evaluation_fraction": args.evaluation_fraction,
         "seed": args.seed,
         "device": str(device),
+        "classifier_fit_device": "cpu" if architecture == "rbf_svm" else str(device),
+        "score_is_calibrated_probability": architecture != "rbf_svm",
     }
     report["calibration_false_positives_at_threshold"] = (
         calibration_false_positives
     )
 
     checkpoint_path = output_dir / "bearing_classifier.pt"
+    state_dict = {
+        name: tensor.detach().cpu()
+        for name, tensor in model.state_dict().items()
+    }
     torch.save(
         {
             "architecture": architecture,
             "hidden_dims": hidden_dims,
-            "state_dict": {
-                name: tensor.detach().cpu()
-                for name, tensor in model.state_dict().items()
-            },
+            "state_dict": state_dict,
             "mean": torch.from_numpy(mean),
             "std": torch.from_numpy(std),
             "threshold": threshold,
@@ -766,6 +840,7 @@ def compare_models(args: argparse.Namespace) -> None:
         ),
         "small": ("small", normal_features),
         "large": ("large", normal_features),
+        "rbf_svm": ("rbf_svm", normal_features),
     }
     fold_results: dict[str, list[dict[str, object]]] = {
         name: [] for name in architecture_specs
@@ -790,18 +865,26 @@ def compare_models(args: argparse.Namespace) -> None:
             f"{len(fold_eval_indices)} validation clips"
         )
         for candidate_name, (architecture, candidate_normal_features) in architecture_specs.items():
-            model = _fit_classifier(
-                features[classifier_indices],
-                labels[classifier_indices],
-                candidate_normal_features,
-                architecture,
-                device,
-                args.seed + fold_number,
-                args.epochs,
-                args.batch_size,
-                args.learning_rate,
-                max(5, args.early_stopping_patience),
-            )
+            if architecture == "rbf_svm":
+                model = _fit_rbf_svm(
+                    features[classifier_indices],
+                    labels[classifier_indices],
+                    candidate_normal_features,
+                    device,
+                )
+            else:
+                model = _fit_classifier(
+                    features[classifier_indices],
+                    labels[classifier_indices],
+                    candidate_normal_features,
+                    architecture,
+                    device,
+                    args.seed + fold_number,
+                    args.epochs,
+                    args.batch_size,
+                    args.learning_rate,
+                    max(5, args.early_stopping_patience),
+                )
             calibration_scores = _probabilities(
                 model, features[threshold_indices], device
             )
@@ -852,7 +935,7 @@ def compare_models(args: argparse.Namespace) -> None:
             print(
                 f"  {candidate_name}: F1={metrics['f1']:.3f}, "
                 f"FP={metrics['false_positives']}, "
-                f"calibration FP={calibration_fp_count}"
+                f"threshold-subset FP={calibration_fp_count}"
             )
 
     summaries = {
@@ -877,6 +960,16 @@ def compare_models(args: argparse.Namespace) -> None:
     large_consistent = (
         large_f1_wins >= required_wins
         and float(summaries["large"]["pooled_f1"])
+        > float(summaries[baseline_name]["pooled_f1"])
+    )
+    svm_folds = fold_results["rbf_svm"]
+    svm_f1_wins = sum(
+        float(svm["metrics"]["f1"]) > float(small["metrics"]["f1"])
+        for small, svm in zip(small_folds, svm_folds)
+    )
+    svm_consistent = (
+        svm_f1_wins >= required_wins
+        and float(summaries["rbf_svm"]["pooled_f1"])
         > float(summaries[baseline_name]["pooled_f1"])
     )
 
@@ -967,12 +1060,17 @@ def compare_models(args: argparse.Namespace) -> None:
             > float(summaries[baseline_name]["pooled_f1"])
         )
 
-    selected_architecture = (
-        "large_pruned"
-        if large_consistent and pruned_wins
-        else "large"
-        if large_consistent
-        else baseline_name
+    eligible_candidates = [baseline_name]
+    if large_consistent:
+        eligible_candidates.append("large_pruned" if pruned_wins else "large")
+    if svm_consistent:
+        eligible_candidates.append("rbf_svm")
+    selected_architecture = max(
+        eligible_candidates,
+        key=lambda name: (
+            float(summaries[name]["pooled_f1"]),
+            -int(summaries[name]["false_positives"]),
+        ),
     )
     report = {
         "comparison_method": (
@@ -985,6 +1083,9 @@ def compare_models(args: argparse.Namespace) -> None:
         "large_model_f1_wins": large_f1_wins,
         "large_model_required_f1_wins": required_wins,
         "large_model_consistently_better": large_consistent,
+        "rbf_svm_f1_wins": svm_f1_wins,
+        "rbf_svm_required_f1_wins": required_wins,
+        "rbf_svm_consistently_better": svm_consistent,
         "best_small_training_strategy": baseline_name,
         "pruned_model_f1_wins": (
             pruned_f1_wins if large_consistent else None
@@ -1043,7 +1144,16 @@ def predict(args: argparse.Namespace) -> None:
         if architecture in ("large", "large_pruned")
         else "small"
     )
-    model = FeatureClassifier(hidden_dims).to(device)
+    if architecture == "rbf_svm":
+        state_dict = checkpoint["state_dict"]
+        model = RbfSVMScorer(
+            state_dict["support_vectors"].numpy(),
+            np.zeros(state_dict["dual_coefficients"].numel(), dtype=np.float32),
+            0.0,
+            1.0,
+        ).to(device)
+    else:
+        model = FeatureClassifier(hidden_dims).to(device)
     model.load_state_dict(checkpoint["state_dict"])
     features = load_features(args.files)[:, None, :, :]
     mean = checkpoint["mean"].numpy()
@@ -1056,16 +1166,17 @@ def predict(args: argparse.Namespace) -> None:
     print(f"Scoring on {device} ({device_name})")
     for path, score in zip(args.files, scores):
         path_threshold = float(domain_thresholds.get(_domain(path), threshold))
-        print(
-            json.dumps(
-                {
-                    "file": str(path),
-                    "anomaly_probability": float(score),
-                    "threshold": path_threshold,
-                    "prediction": "anomaly" if score >= path_threshold else "normal",
-                }
-            )
-        )
+        result: dict[str, str | float] = {
+            "file": str(path),
+            "threshold": path_threshold,
+            "prediction": "anomaly" if score >= path_threshold else "normal",
+        }
+        if architecture == "rbf_svm":
+            result["anomaly_score"] = float(score)
+            result["score_kind"] = "sigmoid-transformed SVM margin (not calibrated probability)"
+        else:
+            result["anomaly_probability"] = float(score)
+        print(json.dumps(result))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1094,7 +1205,13 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--seed", type=int, default=42)
     train_parser.add_argument(
         "--architecture",
-        choices=("small", "small_calibration_only", "large", "large_pruned"),
+        choices=(
+            "small",
+            "small_calibration_only",
+            "large",
+            "large_pruned",
+            "rbf_svm",
+        ),
         default="small",
         help="classifier size; compare command selects this automatically",
     )
