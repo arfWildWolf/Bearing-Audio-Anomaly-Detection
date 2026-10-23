@@ -1,0 +1,16 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Train Bearing Anomaly Detector",
+			"type": "shell",
+			"command": "c:/python314/python.exe",
+			"args": [
+				"bearing_anomaly.py",
+				"train"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		}
+	]
+}
