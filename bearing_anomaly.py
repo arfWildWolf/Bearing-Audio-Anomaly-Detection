@@ -73,11 +73,9 @@ def _mel_filterbank() -> torch.Tensor:
 MEL_FILTERBANK = _mel_filterbank()
 
 
-def extract_feature(path: Path) -> np.ndarray:
-    waveform, sample_rate = sf.read(path, dtype="float32", always_2d=True)
-    waveform = waveform.mean(axis=1)
+def _extract_mel_feature(waveform: np.ndarray, sample_rate: int) -> np.ndarray:
     if waveform.size == 0:
-        raise ValueError(f"Audio file is empty: {path}")
+        raise ValueError("Audio channel is empty.")
     if sample_rate != SAMPLE_RATE:
         divisor = np.gcd(sample_rate, SAMPLE_RATE)
         waveform = resample_poly(
@@ -99,10 +97,36 @@ def extract_feature(path: Path) -> np.ndarray:
     return resized.numpy().astype(np.float32)
 
 
+def extract_feature(path: Path) -> np.ndarray:
+    waveform, sample_rate = sf.read(path, dtype="float32", always_2d=True)
+    return _extract_mel_feature(waveform.mean(axis=1), sample_rate)
+
+
+def extract_dual_channel_features(path: Path) -> np.ndarray:
+    waveform, sample_rate = sf.read(path, dtype="float32", always_2d=True)
+    if waveform.shape[1] != 2:
+        raise ValueError(
+            f"Dual-channel fusion requires exactly 2 channels (near ch01, far ch02); "
+            f"{path} has {waveform.shape[1]}."
+        )
+    return np.stack(
+        [
+            _extract_mel_feature(waveform[:, channel], sample_rate)
+            for channel in range(2)
+        ]
+    )
+
+
 def load_features(paths: list[Path]) -> np.ndarray:
     if not paths:
         raise ValueError("No WAV files were found.")
     return np.stack([extract_feature(path) for path in paths])
+
+
+def load_dual_channel_features(paths: list[Path]) -> np.ndarray:
+    if not paths:
+        raise ValueError("No WAV files were found.")
+    return np.stack([extract_dual_channel_features(path) for path in paths])
 
 
 def labels_from_paths(paths: list[Path]) -> np.ndarray:
@@ -144,23 +168,28 @@ def _domain(path: Path) -> str | None:
 
 
 class FeatureClassifier(nn.Module):
-    def __init__(self, hidden_dims: tuple[int, ...] = (256, 64)) -> None:
+    def __init__(
+        self,
+        hidden_dims: tuple[int, ...] = (256, 64),
+        input_dim: int = N_MELS * 10,
+    ) -> None:
         super().__init__()
         self.hidden_dims = hidden_dims
+        self.input_dim = input_dim
         layers: list[nn.Module] = []
-        input_dim = N_MELS * 10
+        layer_input_dim = input_dim
         for index, hidden_dim in enumerate(hidden_dims):
             layers.append(
                 nn.Sequential(
-                    nn.Linear(input_dim, hidden_dim),
+                    nn.Linear(layer_input_dim, hidden_dim),
                     nn.LayerNorm(hidden_dim),
                     nn.GELU(),
                     nn.Dropout(0.3 if index == 0 else 0.2),
                 )
             )
-            input_dim = hidden_dim
+            layer_input_dim = hidden_dim
         self.layers = nn.ModuleList(layers)
-        self.classifier = nn.Linear(input_dim, 1)
+        self.classifier = nn.Linear(layer_input_dim, 1)
 
     def forward(self, values: torch.Tensor) -> torch.Tensor:
         for layer in self.layers:
@@ -234,9 +263,11 @@ def _prune_mlp(model: FeatureClassifier, keep_fraction: float) -> FeatureClassif
     hidden_dims = tuple(
         max(8, int(round(width * keep_fraction))) for width in model.hidden_dims
     )
-    pruned = FeatureClassifier(hidden_dims).to(next(model.parameters()).device)
+    pruned = FeatureClassifier(hidden_dims, model.input_dim).to(
+        next(model.parameters()).device
+    )
     previous_indices = torch.arange(
-        N_MELS * 10, device=next(model.parameters()).device
+        model.input_dim, device=next(model.parameters()).device
     )
 
     with torch.no_grad():
@@ -265,6 +296,26 @@ def _prepare_model_features(raw: np.ndarray, architecture: str) -> np.ndarray:
     if architecture not in ARCHITECTURES and architecture != "rbf_svm":
         raise ValueError(f"Unknown model architecture: {architecture}")
     return _summarize_spectrograms(raw)
+
+
+def _normalize_dual_channel(
+    features: np.ndarray, mean: np.ndarray, std: np.ndarray
+) -> np.ndarray:
+    return np.clip(
+        (features - mean[None, :, :, None]) / std[None, :, :, None],
+        -8.0,
+        8.0,
+    ).astype(np.float32)
+
+
+def _summarize_dual_channel(features: np.ndarray) -> np.ndarray:
+    if features.ndim != 4 or features.shape[1] != 2:
+        raise ValueError(
+            "Expected normalized spectrograms shaped (clips, 2, mels, frames)."
+        )
+    near = _summarize_spectrograms(features[:, 0:1])
+    far = _summarize_spectrograms(features[:, 1:2])
+    return np.concatenate([near, near - far], axis=1).astype(np.float32)
 
 
 def _probabilities(
@@ -711,6 +762,7 @@ def _fit_classifier(
     learning_rate: float,
     patience: int,
     prune_keep_fraction: float | None = None,
+    input_dim: int = N_MELS * 10,
 ) -> FeatureClassifier:
     _set_seed(seed)
     train_indices, validation_indices = train_test_split(
@@ -750,7 +802,7 @@ def _fit_classifier(
         num_workers=0,
     )
 
-    model = FeatureClassifier(ARCHITECTURES[architecture]).to(device)
+    model = FeatureClassifier(ARCHITECTURES[architecture], input_dim).to(device)
     loss_function = nn.BCEWithLogitsLoss()
 
     def fit_stage(stage_model: FeatureClassifier) -> FeatureClassifier:
@@ -799,6 +851,8 @@ def train(args: argparse.Namespace) -> dict[str, object]:
     data_dir = args.data_dir
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
+    architecture = args.architecture
+    use_dual_channel = architecture == "small_dual_channel_normal_rank"
 
     train_paths = sorted((data_dir / "train").glob("*.wav"))
     test_paths = sorted((data_dir / "test").glob("*.wav"))
@@ -811,15 +865,33 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         raise ValueError("The labeled test set must contain normal and anomaly clips.")
 
     print(f"Extracting features from {len(train_paths)} normal training clips...")
-    raw_train_features = load_features(train_paths)[:, None, :, :]
+    raw_train_features = (
+        load_dual_channel_features(train_paths)
+        if use_dual_channel
+        else load_features(train_paths)[:, None, :, :]
+    )
     print(f"Extracting features from {len(test_paths)} labeled evaluation clips...")
-    raw_test_features = load_features(test_paths)[:, None, :, :]
+    raw_test_features = (
+        load_dual_channel_features(test_paths)
+        if use_dual_channel
+        else load_features(test_paths)[:, None, :, :]
+    )
 
-    mean = raw_train_features.mean(axis=(0, 1, 3))
-    std = raw_train_features.std(axis=(0, 1, 3))
+    if use_dual_channel:
+        mean = raw_train_features.mean(axis=(0, 3))
+        std = raw_train_features.std(axis=(0, 3))
+        normalize = _normalize_dual_channel
+        summarize = _summarize_dual_channel
+        model_input_dim = 2 * N_MELS * 10
+    else:
+        mean = raw_train_features.mean(axis=(0, 1, 3))
+        std = raw_train_features.std(axis=(0, 1, 3))
+        normalize = _normalize
+        summarize = lambda features: _prepare_model_features(features, "small")
+        model_input_dim = N_MELS * 10
     std = np.maximum(std, 1e-4)
-    train_features = _normalize(raw_train_features, mean, std)
-    test_features = _normalize(raw_test_features, mean, std)
+    train_features = normalize(raw_train_features, mean, std)
+    test_features = normalize(raw_test_features, mean, std)
 
     indices = np.arange(len(test_paths))
     strata = stratification_labels(test_paths, test_labels)
@@ -837,7 +909,6 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         stratify=strata[calibration_indices],
     )
     device = _get_device(args.device)
-    architecture = args.architecture
     use_normal_rank = architecture.endswith("_normal_rank")
     architecture_without_rank = (
         architecture.removesuffix("_normal_rank")
@@ -860,12 +931,12 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         args.prune_keep_fraction if model_architecture == "large_pruned" else None
     )
     normal_features = (
-        _prepare_model_features(train_features, base_architecture)
+        summarize(train_features)
         if model_architecture != "small_calibration_only"
         else np.empty((0, N_MELS * 10), dtype=np.float32)
     )
-    knn_reference_features = _prepare_model_features(train_features, base_architecture)
-    test_model_features = _prepare_model_features(test_features, base_architecture)
+    knn_reference_features = summarize(train_features)
+    test_model_features = summarize(test_features)
     autoencoder_extractor = None
     autoencoder_state_dict = None
     autoencoder_mean = None
@@ -930,6 +1001,7 @@ def train(args: argparse.Namespace) -> dict[str, object]:
             args.learning_rate,
             max(5, args.early_stopping_patience),
             prune_keep_fraction,
+            model_input_dim,
         )
     test_features = test_model_features
     hidden_dims = model.hidden_dims if isinstance(model, FeatureClassifier) else ()
@@ -1032,6 +1104,11 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         "model": "supervised deep log-mel statistics classifier",
         "architecture": architecture,
         "hidden_dims": list(hidden_dims),
+        "feature_transform": (
+            "640-d near-channel log-mel summary concatenated with its difference from the far-channel summary"
+            if use_dual_channel
+            else "640-d mono log-mel summary"
+        ),
         "threshold": threshold,
         "thresholds_by_domain": domain_thresholds,
         "threshold_optimization_metric": (
@@ -1092,6 +1169,7 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         {
             "architecture": architecture,
             "hidden_dims": hidden_dims,
+            "input_dim": model.input_dim if isinstance(model, FeatureClassifier) else None,
             "state_dict": state_dict,
             "mean": torch.from_numpy(mean),
             "std": torch.from_numpy(std),
@@ -1869,6 +1947,7 @@ def predict(args: argparse.Namespace) -> None:
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
     architecture = checkpoint.get("architecture", "small")
     hidden_dims = tuple(checkpoint.get("hidden_dims", ARCHITECTURES["small"]))
+    use_dual_channel = architecture == "small_dual_channel_normal_rank"
     use_normal_rank = architecture.endswith("_normal_rank")
     architecture_without_rank = (
         architecture.removesuffix("_normal_rank")
@@ -1876,10 +1955,15 @@ def predict(args: argparse.Namespace) -> None:
         else architecture
     )
     use_autoencoder_features = architecture_without_rank.endswith("_autoencoder")
-    architecture_without_autoencoder = (
-        architecture_without_rank.removesuffix("_autoencoder")
-        if use_autoencoder_features
+    architecture_without_channel_mode = (
+        architecture_without_rank.removesuffix("_dual_channel")
+        if architecture_without_rank.endswith("_dual_channel")
         else architecture_without_rank
+    )
+    architecture_without_autoencoder = (
+        architecture_without_channel_mode.removesuffix("_autoencoder")
+        if architecture_without_channel_mode.endswith("_autoencoder")
+        else architecture_without_channel_mode
     )
     model_architecture = architecture_without_autoencoder
     model_architecture = model_architecture.removesuffix("_knn")
@@ -1897,12 +1981,28 @@ def predict(args: argparse.Namespace) -> None:
             1.0,
         ).to(device)
     else:
-        model = FeatureClassifier(hidden_dims).to(device)
+        model = FeatureClassifier(
+            hidden_dims,
+            int(checkpoint.get("input_dim", N_MELS * 10)),
+        ).to(device)
     model.load_state_dict(checkpoint["state_dict"])
-    features = load_features(args.files)[:, None, :, :]
+    features = (
+        load_dual_channel_features(args.files)
+        if use_dual_channel
+        else load_features(args.files)[:, None, :, :]
+    )
     mean = checkpoint["mean"].numpy()
     std = checkpoint["std"].numpy()
-    normalized = _prepare_model_features(_normalize(features, mean, std), base_architecture)
+    normalized_features = (
+        _normalize_dual_channel(features, mean, std)
+        if use_dual_channel
+        else _normalize(features, mean, std)
+    )
+    normalized = (
+        _summarize_dual_channel(normalized_features)
+        if use_dual_channel
+        else _prepare_model_features(normalized_features, base_architecture)
+    )
     scores = _probabilities(model, normalized, device)
     knn_features = normalized
     if use_autoencoder_features:
@@ -2035,9 +2135,10 @@ def build_parser() -> argparse.ArgumentParser:
             "rbf_svm_normal_rank",
             "rbf_svm_knn_normal_rank",
             "small_knn_autoencoder_normal_rank",
+            "small_dual_channel_normal_rank",
         ),
         default="small_normal_rank",
-        help="classifier strategy with optional kNN/autoencoder features and rank scaling",
+        help="classifier strategy with optional kNN, autoencoder, dual-channel features, and rank scaling",
     )
     train_parser.add_argument("--prune-keep-fraction", type=float, default=0.7)
     train_parser.add_argument(

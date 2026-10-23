@@ -64,6 +64,20 @@ its path. It is an in-domain autoencoder representation, not a BEATs or EAT
 foundation-model embedding. Those pretrained models are not included in the
 workspace.
 
+For paired near/far stereo recordings, train the dual-channel candidate with:
+
+```powershell
+python bearing_anomaly.py train --architecture small_dual_channel_normal_rank --data-dir path\to\stereo-bearing
+```
+
+The candidate requires exactly two channels in every WAV, with channel 1
+(`ch01`) near-field and channel 2 (`ch02`) far-field. It builds separate
+640-dimensional log-mel summaries and trains the MLP on
+`[near, near - far]` (1280 inputs), then applies the same empirical normal-rank
+calibration and thresholding as the mono model. Prediction with its checkpoint
+also requires two-channel WAVs in the same channel order. Mono data cannot
+measure this candidate; the existing mono baseline remains unchanged.
+
 The comparison reports standardized partial ROC AUC with maximum FPR 0.1, and
 selects the best strategy by mean fold harmonic mean (F1). Larger models must
 improve F1 in at least 80% of folds and improve mean F1 to qualify; a
