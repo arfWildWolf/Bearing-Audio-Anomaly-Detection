@@ -13,10 +13,15 @@ import soundfile as sf
 import torch
 from scipy.signal import resample_poly
 from sklearn.metrics import (
+    accuracy_score,
+    average_precision_score,
+    balanced_accuracy_score,
     confusion_matrix,
     f1_score,
+    matthews_corrcoef,
     precision_recall_curve,
     precision_score,
+    roc_auc_score,
     recall_score,
 )
 from sklearn.model_selection import train_test_split
@@ -377,19 +382,67 @@ def _summarize_spectrograms(features: np.ndarray) -> np.ndarray:
     return np.concatenate(summaries, axis=1).astype(np.float32)
 
 
-def _metrics(labels: np.ndarray, predictions: np.ndarray) -> dict[str, object]:
+def _metrics(
+    labels: np.ndarray, predictions: np.ndarray, scores: np.ndarray
+) -> dict[str, object]:
     matrix = confusion_matrix(labels, predictions, labels=[0, 1])
     true_negatives, false_positives = matrix[0]
+    false_negatives, true_positives = matrix[1]
+    precision = float(precision_score(labels, predictions, zero_division=0))
+    recall = float(recall_score(labels, predictions, zero_division=0))
+    specificity = float(
+        true_negatives / (true_negatives + false_positives)
+        if true_negatives + false_positives
+        else 0.0
+    )
+    negative_predictive_value = float(
+        true_negatives / (true_negatives + false_negatives)
+        if true_negatives + false_negatives
+        else 0.0
+    )
+    precision_recall_sum = precision + recall
+    harmonic_mean = (
+        2 * precision * recall / precision_recall_sum
+        if precision_recall_sum
+        else 0.0
+    )
+    has_both_classes = np.unique(labels).size == 2
     return {
         "f1": float(f1_score(labels, predictions, zero_division=0)),
-        "precision": float(precision_score(labels, predictions, zero_division=0)),
-        "recall": float(recall_score(labels, predictions, zero_division=0)),
+        "harmonic_mean_precision_recall": float(harmonic_mean),
+        "precision": precision,
+        "recall": recall,
+        "sensitivity": recall,
+        "specificity": specificity,
+        "negative_predictive_value": negative_predictive_value,
+        "accuracy": float(accuracy_score(labels, predictions)),
+        "balanced_accuracy": float(balanced_accuracy_score(labels, predictions)),
+        "geometric_mean_sensitivity_specificity": float(
+            np.sqrt(recall * specificity)
+        ),
+        "matthews_correlation_coefficient": float(
+            matthews_corrcoef(labels, predictions)
+        ),
+        "roc_auc": (
+            float(roc_auc_score(labels, scores)) if has_both_classes else None
+        ),
+        "average_precision": (
+            float(average_precision_score(labels, scores))
+            if has_both_classes
+            else None
+        ),
         "false_positives": int(false_positives),
+        "false_negatives": int(false_negatives),
         "true_positives": int(matrix[1, 1]),
-        "false_positive_rate": float(
-            false_positives / (true_negatives + false_positives)
-            if true_negatives + false_positives
+        "true_negatives": int(true_negatives),
+        "false_positive_rate": float(1.0 - specificity),
+        "false_negative_rate": float(
+            false_negatives / (false_negatives + true_positives)
+            if false_negatives + true_positives
             else 0.0
+        ),
+        "fowlkes_mallows_index": float(
+            np.sqrt(precision * recall) if precision * recall else 0.0
         ),
         "confusion_matrix_normal_anomaly": matrix.tolist(),
         "samples": int(len(labels)),
@@ -620,9 +673,11 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         "threshold_calibrated_on": (
             "labeled threshold-validation subset of the calibration split"
         ),
-        "evaluation": _metrics(evaluation_labels, evaluation_predictions),
+        "evaluation": _metrics(
+            evaluation_labels, evaluation_predictions, evaluation_scores
+        ),
         "threshold_validation": _metrics(
-            test_labels[threshold_indices], threshold_predictions
+            test_labels[threshold_indices], threshold_predictions, threshold_scores
         ),
         "normalization_normal_clips": len(train_paths),
         "normal_clips_in_classifier_training": len(normal_features),
@@ -778,6 +833,27 @@ def _aggregate_fold_metrics(folds: list[dict[str, object]]) -> dict[str, object]
     normal_count = sample_count - anomaly_count
     false_negatives = anomaly_count - true_positives
     f1_denominator = 2 * true_positives + false_positives + false_negatives
+    mean_fold_metrics = {
+        f"mean_fold_{name}": float(
+            np.mean(
+                [
+                    float(fold["metrics"][name])
+                    for fold in folds
+                    if fold["metrics"][name] is not None
+                ]
+            )
+        )
+        for name in (
+            "roc_auc",
+            "average_precision",
+            "accuracy",
+            "balanced_accuracy",
+            "harmonic_mean_precision_recall",
+            "specificity",
+            "matthews_correlation_coefficient",
+        )
+        if any(fold["metrics"][name] is not None for fold in folds)
+    }
     return {
         "folds": len(folds),
         "mean_fold_f1": float(
@@ -794,6 +870,7 @@ def _aggregate_fold_metrics(folds: list[dict[str, object]]) -> dict[str, object]
         "false_positive_rate": false_positives / normal_count if normal_count else 0.0,
         "normal_clips": normal_count,
         "anomaly_clips": anomaly_count,
+        **mean_fold_metrics,
         "fold_metrics": folds,
     }
 
@@ -901,7 +978,7 @@ def compare_models(args: argparse.Namespace) -> None:
                 ]
             )
             eval_predictions = (eval_scores >= eval_thresholds).astype(np.int64)
-            metrics = _metrics(fold_labels, eval_predictions)
+            metrics = _metrics(fold_labels, eval_predictions, eval_scores)
             fold_results[candidate_name].append(
                 {
                     "fold": fold_number,
@@ -1019,6 +1096,7 @@ def compare_models(args: argparse.Namespace) -> None:
             metrics = _metrics(
                 labels[fold_eval_indices],
                 (eval_scores >= eval_thresholds).astype(np.int64),
+                eval_scores,
             )
             pruned_results.append(
                 {

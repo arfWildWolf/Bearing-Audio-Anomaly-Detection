@@ -75,8 +75,15 @@ Some calibration clips train the classifier; a separate calibration portion
 sets thresholds to maximize F1, with separate thresholds for the `source` and
 `target` domains when identified in the filename. Threshold selection uses
 calibration labels only; held-out evaluation labels do not affect the model or
-threshold. The report includes held-out precision, recall, F1, false-positive
-count, and rate, which can differ from calibration because of sampling
+threshold. The report includes thresholded metrics (accuracy, balanced accuracy,
+precision, recall/sensitivity, specificity, negative predictive value,
+false-positive and false-negative rates, F1, the precision-recall harmonic
+mean, Matthews correlation coefficient, and confusion-matrix counts) as well
+as score-based ROC AUC and average precision (PR AUC). The harmonic mean of
+precision and recall is mathematically F1, so those two values should agree
+apart from rounding. AUC metrics evaluate score ranking and do not depend on
+the selected decision threshold. Metrics are reported for both threshold
+validation and held-out evaluation, and may differ because of sampling
 variation. F1 optimization does not guarantee a low false-positive rate. This
 is a supervised detector because anomaly examples from the calibration split
 are used during training. Set `--seed` to reproduce a run.
@@ -84,7 +91,8 @@ are used during training. Set `--seed` to reproduce a run.
 The trained model and evaluation artifacts are saved under `outputs/`:
 
 - `bearing_classifier.pt` — model weights, normalization values, and threshold
-- `metrics.json` — held-out precision, recall, F1, and confusion matrix
+- `metrics.json` — thresholded metrics and score-based ROC/PR AUC for
+  threshold-validation and held-out evaluation sets
 - `scores.csv` — per-file anomaly scores, predictions, and split assignments
 - `model_comparison.json` — cross-validation results for each model candidate
 - `cross_validation_false_positives.csv` — normal validation clips flagged by
