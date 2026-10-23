@@ -15,7 +15,7 @@
 			"problemMatcher": []
 		},
 		{
-			"label": "Compare Models by Cross-Validated F2",
+			"label": "Compare Models by Cross-Validated Harmonic Mean",
 			"type": "shell",
 			"command": "${command:python.interpreterPath}",
 			"args": [
@@ -49,6 +49,23 @@
 				"--checkpoint",
 				"outputs\\bearing_classifier.pt",
 				"bearing\\test\\section_00_source_test_anomaly_0000_noAttribute.wav"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Train Autoencoder Feature Stack Candidate",
+			"type": "shell",
+			"command": "${command:python.interpreterPath}",
+			"args": [
+				"bearing_anomaly.py",
+				"train",
+				"--architecture",
+				"small_knn_autoencoder_normal_rank",
+				"--device",
+				"cuda",
+				"--output-dir",
+				"outputs\\autoencoder_feature_stack_candidate"
 			],
 			"isBackground": false,
 			"problemMatcher": []

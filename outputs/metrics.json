@@ -1,84 +1,87 @@
 {
   "model": "supervised deep log-mel statistics classifier",
-  "architecture": "small",
+  "architecture": "small_normal_rank",
   "hidden_dims": [
     256,
     64
   ],
-  "threshold": 0.044487930834293365,
+  "threshold": 0.92,
   "thresholds_by_domain": {
-    "source": 0.04451042413711548,
-    "target": 0.044487930834293365
+    "source": 0.9166666666666666,
+    "target": 0.9230769230769231
   },
-  "threshold_optimization_metric": "maximum F-beta on threshold-validation clips per domain",
-  "threshold_optimization_beta": 2.0,
-  "score_normalization": "none",
+  "threshold_optimization_metric": "maximum recall subject to calibration false-positive-rate < configured cap",
+  "maximum_false_positive_rate": 0.1,
+  "score_normalization": "empirical normal-validation rank",
+  "knn_feature_stack": "log-mel statistics",
   "threshold_calibrated_on": "labeled threshold-validation subset of the calibration split",
   "evaluation": {
-    "f1": 0.7222222222222222,
-    "f2": 0.8024691358024691,
-    "harmonic_mean_precision_recall": 0.7222222222222222,
-    "precision": 0.6190476190476191,
-    "recall": 0.8666666666666667,
-    "sensitivity": 0.8666666666666667,
-    "specificity": 0.4666666666666667,
-    "negative_predictive_value": 0.7777777777777778,
-    "accuracy": 0.6666666666666666,
-    "balanced_accuracy": 0.6666666666666667,
-    "geometric_mean_sensitivity_specificity": 0.6359594676112971,
-    "matthews_correlation_coefficient": 0.363696483726654,
-    "roc_auc": 0.78,
-    "average_precision": 0.7828666924738306,
-    "false_positives": 16,
-    "false_negatives": 4,
-    "true_positives": 26,
-    "true_negatives": 14,
-    "false_positive_rate": 0.5333333333333333,
-    "false_negative_rate": 0.13333333333333333,
-    "fowlkes_mallows_index": 0.7324670207647144,
+    "f1": 0.4,
+    "f2": 0.3076923076923077,
+    "harmonic_mean_precision_recall": 0.4,
+    "precision": 0.8,
+    "recall": 0.26666666666666666,
+    "sensitivity": 0.26666666666666666,
+    "specificity": 0.9333333333333333,
+    "negative_predictive_value": 0.56,
+    "accuracy": 0.6,
+    "balanced_accuracy": 0.6,
+    "geometric_mean_sensitivity_specificity": 0.49888765156985887,
+    "matthews_correlation_coefficient": 0.2683281572999747,
+    "roc_auc": 0.7811111111111111,
+    "partial_roc_auc_fpr_0_1": 0.6052631578947368,
+    "average_precision": 0.7512800308620498,
+    "false_positives": 2,
+    "false_negatives": 22,
+    "true_positives": 8,
+    "true_negatives": 28,
+    "false_positive_rate": 0.06666666666666665,
+    "false_negative_rate": 0.7333333333333333,
+    "fowlkes_mallows_index": 0.46188021535170065,
     "confusion_matrix_normal_anomaly": [
       [
-        14,
-        16
+        28,
+        2
       ],
       [
-        4,
-        26
+        22,
+        8
       ]
     ],
     "samples": 60,
     "anomalies": 30
   },
   "threshold_validation": {
-    "f1": 0.7741935483870968,
-    "f2": 0.8955223880597015,
-    "harmonic_mean_precision_recall": 0.7741935483870968,
-    "precision": 0.631578947368421,
-    "recall": 1.0,
-    "sensitivity": 1.0,
-    "specificity": 0.44,
-    "negative_predictive_value": 1.0,
-    "accuracy": 0.7142857142857143,
-    "balanced_accuracy": 0.72,
-    "geometric_mean_sensitivity_specificity": 0.6633249580710799,
-    "matthews_correlation_coefficient": 0.5271572221283753,
-    "roc_auc": 0.8133333333333332,
-    "average_precision": 0.8257313703400658,
-    "false_positives": 14,
-    "false_negatives": 0,
-    "true_positives": 24,
-    "true_negatives": 11,
-    "false_positive_rate": 0.56,
-    "false_negative_rate": 0.0,
-    "fowlkes_mallows_index": 0.7947194142390263,
+    "f1": 0.7317073170731707,
+    "f2": 0.6637168141592921,
+    "harmonic_mean_precision_recall": 0.7317073170731708,
+    "precision": 0.8823529411764706,
+    "recall": 0.625,
+    "sensitivity": 0.625,
+    "specificity": 0.92,
+    "negative_predictive_value": 0.71875,
+    "accuracy": 0.7755102040816326,
+    "balanced_accuracy": 0.7725,
+    "geometric_mean_sensitivity_specificity": 0.7582875444051551,
+    "matthews_correlation_coefficient": 0.572364484346449,
+    "roc_auc": 0.8524999999999999,
+    "partial_roc_auc_fpr_0_1": 0.7412280701754386,
+    "average_precision": 0.8601629093282585,
+    "false_positives": 2,
+    "false_negatives": 9,
+    "true_positives": 15,
+    "true_negatives": 23,
+    "false_positive_rate": 0.07999999999999996,
+    "false_negative_rate": 0.375,
+    "fowlkes_mallows_index": 0.7426106572325057,
     "confusion_matrix_normal_anomaly": [
       [
-        11,
-        14
+        23,
+        2
       ],
       [
-        0,
-        24
+        9,
+        15
       ]
     ],
     "samples": 49,
@@ -92,6 +95,6 @@
   "seed": 42,
   "device": "cuda",
   "classifier_fit_device": "cuda",
-  "score_is_calibrated_probability": true,
-  "calibration_false_positives_at_threshold": 14
+  "score_is_calibrated_probability": false,
+  "calibration_false_positives_at_threshold": 2
 }

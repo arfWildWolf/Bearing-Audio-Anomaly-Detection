@@ -1,0 +1,100 @@
+{
+  "model": "supervised deep log-mel statistics classifier",
+  "architecture": "small_knn_autoencoder_normal_rank",
+  "hidden_dims": [
+    256,
+    64
+  ],
+  "threshold": 0.92,
+  "thresholds_by_domain": {
+    "source": 0.9166666666666666,
+    "target": 0.9230769230769231
+  },
+  "threshold_optimization_metric": "maximum recall subject to calibration false-positive-rate < configured cap",
+  "maximum_false_positive_rate": 0.1,
+  "score_normalization": "balanced raw/autoencoder kNN distance followed by empirical normal-validation rank",
+  "knn_feature_stack": "log-mel statistics + locally saved autoencoder latent mean/std",
+  "threshold_calibrated_on": "labeled threshold-validation subset of the calibration split",
+  "evaluation": {
+    "f1": 0.4,
+    "f2": 0.3076923076923077,
+    "harmonic_mean_precision_recall": 0.4,
+    "precision": 0.8,
+    "recall": 0.26666666666666666,
+    "sensitivity": 0.26666666666666666,
+    "specificity": 0.9333333333333333,
+    "negative_predictive_value": 0.56,
+    "accuracy": 0.6,
+    "balanced_accuracy": 0.6,
+    "geometric_mean_sensitivity_specificity": 0.49888765156985887,
+    "matthews_correlation_coefficient": 0.2683281572999747,
+    "roc_auc": 0.7688888888888888,
+    "partial_roc_auc_fpr_0_1": 0.5789473684210527,
+    "average_precision": 0.7248212783865582,
+    "false_positives": 2,
+    "false_negatives": 22,
+    "true_positives": 8,
+    "true_negatives": 28,
+    "false_positive_rate": 0.06666666666666665,
+    "false_negative_rate": 0.7333333333333333,
+    "fowlkes_mallows_index": 0.46188021535170065,
+    "confusion_matrix_normal_anomaly": [
+      [
+        28,
+        2
+      ],
+      [
+        22,
+        8
+      ]
+    ],
+    "samples": 60,
+    "anomalies": 30
+  },
+  "threshold_validation": {
+    "f1": 0.7317073170731707,
+    "f2": 0.6637168141592921,
+    "harmonic_mean_precision_recall": 0.7317073170731708,
+    "precision": 0.8823529411764706,
+    "recall": 0.625,
+    "sensitivity": 0.625,
+    "specificity": 0.92,
+    "negative_predictive_value": 0.71875,
+    "accuracy": 0.7755102040816326,
+    "balanced_accuracy": 0.7725,
+    "geometric_mean_sensitivity_specificity": 0.7582875444051551,
+    "matthews_correlation_coefficient": 0.572364484346449,
+    "roc_auc": 0.8341666666666666,
+    "partial_roc_auc_fpr_0_1": 0.75,
+    "average_precision": 0.8508403531672846,
+    "false_positives": 2,
+    "false_negatives": 9,
+    "true_positives": 15,
+    "true_negatives": 23,
+    "false_positive_rate": 0.07999999999999996,
+    "false_negative_rate": 0.375,
+    "fowlkes_mallows_index": 0.7426106572325057,
+    "confusion_matrix_normal_anomaly": [
+      [
+        23,
+        2
+      ],
+      [
+        9,
+        15
+      ]
+    ],
+    "samples": 49,
+    "anomalies": 24
+  },
+  "normalization_normal_clips": 1000,
+  "normal_clips_in_classifier_training": 1000,
+  "labeled_calibration_training_clips": 91,
+  "test_clips": 200,
+  "evaluation_fraction": 0.3,
+  "seed": 42,
+  "device": "cuda",
+  "classifier_fit_device": "cuda",
+  "score_is_calibrated_probability": false,
+  "calibration_false_positives_at_threshold": 2
+}

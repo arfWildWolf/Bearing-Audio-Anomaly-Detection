@@ -199,6 +199,29 @@ class RbfSVMScorer(nn.Module):
         return (kernels @ self.dual_coefficients.unsqueeze(1)).squeeze(1) + self.intercept
 
 
+class AutoencoderFeatureExtractor(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=4, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(16, 32, kernel_size=4, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, 16, kernel_size=4, stride=2, padding=1),
+            nn.ReLU(),
+        )
+
+    def forward(self, values: torch.Tensor) -> torch.Tensor:
+        latent = self.encoder(values)
+        return torch.cat(
+            [
+                latent.mean(dim=(2, 3)),
+                latent.std(dim=(2, 3), unbiased=False),
+            ],
+            dim=1,
+        )
+
+
 ARCHITECTURES: dict[str, tuple[int, ...]] = {
     "small": (256, 64),
     "large": (512, 256, 128),
@@ -262,12 +285,26 @@ def _fit_knn_distance_reference(
     normal_features: np.ndarray,
     device: torch.device,
     neighbors: int = 10,
+    feature_block_dims: tuple[int, ...] | None = None,
 ) -> dict[str, object]:
     if len(normal_features) < 2:
         raise ValueError("kNN score normalization requires at least two normal clips.")
     mean = normal_features.mean(axis=0)
     std = np.maximum(normal_features.std(axis=0), 1e-6)
     standardized = np.clip((normal_features - mean) / std, -8.0, 8.0)
+    block_dims = feature_block_dims or (normal_features.shape[1],)
+    if sum(block_dims) != normal_features.shape[1] or any(
+        block_dim <= 0 for block_dim in block_dims
+    ):
+        raise ValueError("Feature block dimensions must partition the input features.")
+    block_scales = tuple(
+        float(np.sqrt(1.0 / (len(block_dims) * block_dim)))
+        for block_dim in block_dims
+    )
+    offset = 0
+    for block_dim, scale in zip(block_dims, block_scales):
+        standardized[:, offset : offset + block_dim] *= scale
+        offset += block_dim
     reference = torch.from_numpy(standardized.astype(np.float32)).to(device)
     k = min(neighbors, len(reference) - 1)
     leave_one_out_distances: list[torch.Tensor] = []
@@ -294,6 +331,8 @@ def _fit_knn_distance_reference(
         "baseline_distance": baseline_distance,
         "neighbors": k,
         "alpha": 1.0,
+        "block_dims": block_dims,
+        "block_scales": block_scales,
     }
 
 
@@ -316,6 +355,18 @@ def _apply_knn_score_normalization(
         for start in range(0, len(features), 32):
             query = torch.from_numpy(features[start : start + 32]).to(device)
             query = ((query - mean) / std).clamp(-8.0, 8.0)
+            block_dims = tuple(
+                reference_stats.get("block_dims", (query.shape[1],))
+            )
+            block_scales = tuple(
+                reference_stats.get("block_scales", (1.0,) * len(block_dims))
+            )
+            if len(block_dims) != len(block_scales) or sum(block_dims) != query.shape[1]:
+                raise ValueError("Invalid kNN feature-block calibration data.")
+            offset = 0
+            for block_dim, scale in zip(block_dims, block_scales):
+                query[:, offset : offset + block_dim] *= scale
+                offset += block_dim
             distances = torch.cdist(query, reference)
             mean_neighbor_distance = distances.topk(
                 neighbors, largest=False
@@ -328,6 +379,84 @@ def _apply_knn_score_normalization(
             adjusted_logits = score_logits + alpha * torch.log(distance_ratio)
             normalized_scores.append(torch.sigmoid(adjusted_logits).cpu().numpy())
     return np.concatenate(normalized_scores)
+
+
+def _build_autoencoder_extractor(
+    state_dict: dict[str, torch.Tensor], device: torch.device
+) -> AutoencoderFeatureExtractor:
+    extractor = AutoencoderFeatureExtractor()
+    encoder_state = {
+        key.removeprefix("encoder."): value
+        for key, value in state_dict.items()
+        if key.startswith("encoder.")
+    }
+    extractor.encoder.load_state_dict(encoder_state, strict=True)
+    return extractor.to(device).eval()
+
+
+def _load_autoencoder_extractor(
+    checkpoint_path: Path, device: torch.device
+) -> tuple[
+    AutoencoderFeatureExtractor,
+    np.ndarray,
+    np.ndarray,
+    dict[str, torch.Tensor],
+]:
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(
+            f"Autoencoder feature checkpoint not found: {checkpoint_path}"
+        )
+    numpy_core = getattr(np, "_core", None)
+    if numpy_core is None:
+        numpy_core = np.core
+    safe_numpy_types = [
+        numpy_core.multiarray._reconstruct,
+        np.ndarray,
+        np.dtype,
+        type(np.dtype(np.float32)),
+    ]
+    with torch.serialization.safe_globals(safe_numpy_types):
+        checkpoint = torch.load(
+            checkpoint_path, map_location="cpu", weights_only=True
+        )
+    state_dict = checkpoint.get("state_dict")
+    if not isinstance(state_dict, dict):
+        raise ValueError("Autoencoder checkpoint does not contain a state_dict.")
+    extractor = _build_autoencoder_extractor(state_dict, device)
+    return (
+        extractor,
+        np.asarray(checkpoint["mean"], dtype=np.float32),
+        np.asarray(checkpoint["std"], dtype=np.float32),
+        {
+            key: value.detach().cpu()
+            for key, value in state_dict.items()
+            if key.startswith("encoder.")
+        },
+    )
+
+
+def _autoencoder_features(
+    raw_features: np.ndarray,
+    extractor: AutoencoderFeatureExtractor,
+    mean: np.ndarray,
+    std: np.ndarray,
+    device: torch.device,
+) -> np.ndarray:
+    normalized = _normalize(raw_features, mean, std)
+    batches: list[np.ndarray] = []
+    with torch.no_grad():
+        for start in range(0, len(normalized), 32):
+            values = torch.from_numpy(normalized[start : start + 32]).to(device)
+            batches.append(extractor(values).cpu().numpy())
+    return np.concatenate(batches).astype(np.float32)
+
+
+def _stack_knn_features(
+    raw_features: np.ndarray, autoencoder_features: np.ndarray
+) -> np.ndarray:
+    if len(raw_features) != len(autoencoder_features):
+        raise ValueError("Raw and autoencoder feature batches must be aligned.")
+    return np.concatenate([raw_features, autoencoder_features], axis=1)
 
 
 def _fit_rbf_svm(
@@ -361,62 +490,91 @@ def _fit_rbf_svm(
     ).to(device)
 
 
-def _maximum_fbeta_threshold(
-    labels: np.ndarray, scores: np.ndarray, beta: float
-) -> tuple[float, int]:
-    candidates = np.concatenate(
-        [np.nextafter(np.max(scores), np.inf).reshape(1), np.unique(scores)]
-    )
-    candidates_by_fbeta: list[tuple[float, int, float]] = []
-    for threshold in candidates:
-        predictions = scores >= threshold
-        false_positives = int(np.count_nonzero(predictions & (labels == 0)))
-        true_positives = int(np.count_nonzero(predictions & (labels == 1)))
-        false_negatives = int(np.count_nonzero(~predictions & (labels == 1)))
-        beta_squared = beta**2
-        denominator = (
-            (1 + beta_squared) * true_positives
-            + beta_squared * false_negatives
-            + false_positives
-        )
-        fbeta = (
-            (1 + beta_squared) * true_positives / denominator
-            if denominator
-            else 0.0
-        )
-        candidates_by_fbeta.append((fbeta, false_positives, float(threshold)))
-    fbeta, false_positives, threshold = max(
-        candidates_by_fbeta, key=lambda result: (result[0], -result[1], result[2])
-    )
-    return threshold, false_positives
-
-
-def _calibrate_thresholds(
+def _fit_normal_rank_calibrator(
     paths: list[Path],
     labels: np.ndarray,
     scores: np.ndarray,
-    beta: float,
-) -> tuple[float, dict[str, float], int]:
-    overall_threshold, overall_false_positives = _maximum_fbeta_threshold(
-        labels, scores, beta
+    maximum_false_positive_rate: float,
+) -> dict[str, object]:
+    if not 0 < maximum_false_positive_rate < 1:
+        raise ValueError("Maximum false-positive rate must be between 0 and 1.")
+    normal_mask = labels == 0
+    if not normal_mask.any():
+        raise ValueError("Normal-rank calibration requires normal clips.")
+    overall_reference = np.sort(scores[normal_mask].astype(np.float64))
+    overall_raw_threshold = _maximum_fpr_threshold(
+        overall_reference, maximum_false_positive_rate
     )
-    thresholds: dict[str, float] = {}
-    domain_false_positives = 0
+    references_by_domain: dict[str, np.ndarray] = {}
+    raw_thresholds_by_domain: dict[str, float] = {}
     for domain in ("source", "target"):
-        mask = np.array([_domain(path) == domain for path in paths])
-        if not mask.any() or not np.any(labels[mask] == 0) or not np.any(labels[mask] == 1):
-            continue
-        thresholds[domain], false_positives = _maximum_fbeta_threshold(
-            labels[mask], scores[mask], beta
+        domain_mask = normal_mask & np.array(
+            [_domain(path) == domain for path in paths]
         )
-        domain_false_positives += false_positives
-    return (
-        overall_threshold,
-        thresholds,
-        domain_false_positives
-        if thresholds
-        else overall_false_positives,
+        if not domain_mask.any():
+            continue
+        reference = np.sort(scores[domain_mask].astype(np.float64))
+        references_by_domain[domain] = reference
+        raw_thresholds_by_domain[domain] = _maximum_fpr_threshold(
+            reference, maximum_false_positive_rate
+        )
+    rank_threshold = _normal_rank_scores(
+        np.array([overall_raw_threshold]), [Path("unknown")], overall_reference,
+        references_by_domain
+    )[0]
+    rank_thresholds_by_domain = {
+        domain: float(
+            _normal_rank_scores(
+                np.array([raw_threshold]),
+                [Path(f"_{domain}_")],
+                overall_reference,
+                references_by_domain,
+            )[0]
+        )
+        for domain, raw_threshold in raw_thresholds_by_domain.items()
+    }
+    return {
+        "overall_reference": overall_reference,
+        "references_by_domain": references_by_domain,
+        "overall_raw_threshold": overall_raw_threshold,
+        "raw_thresholds_by_domain": raw_thresholds_by_domain,
+        "overall_rank_threshold": float(rank_threshold),
+        "rank_thresholds_by_domain": rank_thresholds_by_domain,
+        "maximum_false_positive_rate": maximum_false_positive_rate,
+        "normal_count": int(np.count_nonzero(normal_mask)),
+        "allowed_false_positives": max(
+            0,
+            int(np.ceil(maximum_false_positive_rate * np.count_nonzero(normal_mask))) - 1,
+        ),
+    }
+
+
+def _normal_rank_scores(
+    scores: np.ndarray,
+    paths: list[Path],
+    overall_reference: np.ndarray,
+    references_by_domain: dict[str, np.ndarray],
+) -> np.ndarray:
+    ranked = np.empty(len(scores), dtype=np.float64)
+    for index, (score, path) in enumerate(zip(scores, paths)):
+        domain = _domain(path)
+        reference = references_by_domain.get(domain, overall_reference)
+        ranked[index] = np.searchsorted(reference, score, side="left") / len(reference)
+    return ranked
+
+
+def _maximum_fpr_threshold(
+    sorted_normal_scores: np.ndarray, maximum_false_positive_rate: float
+) -> float:
+    if sorted_normal_scores.size == 0:
+        raise ValueError("Threshold selection requires normal scores.")
+    allowed_false_positives = max(
+        0,
+        int(np.ceil(maximum_false_positive_rate * len(sorted_normal_scores))) - 1,
     )
+    descending = np.sort(sorted_normal_scores)[::-1]
+    boundary_index = min(allowed_false_positives, len(descending) - 1)
+    return float(np.nextafter(descending[boundary_index], np.inf))
 
 
 def _set_seed(seed: int) -> None:
@@ -511,6 +669,11 @@ def _metrics(
         ),
         "roc_auc": (
             float(roc_auc_score(labels, scores)) if has_both_classes else None
+        ),
+        "partial_roc_auc_fpr_0_1": (
+            float(roc_auc_score(labels, scores, max_fpr=0.1))
+            if has_both_classes
+            else None
         ),
         "average_precision": (
             float(average_precision_score(labels, scores))
@@ -648,15 +811,15 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         raise ValueError("The labeled test set must contain normal and anomaly clips.")
 
     print(f"Extracting features from {len(train_paths)} normal training clips...")
-    train_features = load_features(train_paths)[:, None, :, :]
+    raw_train_features = load_features(train_paths)[:, None, :, :]
     print(f"Extracting features from {len(test_paths)} labeled evaluation clips...")
-    test_features = load_features(test_paths)[:, None, :, :]
+    raw_test_features = load_features(test_paths)[:, None, :, :]
 
-    mean = train_features.mean(axis=(0, 1, 3))
-    std = train_features.std(axis=(0, 1, 3))
+    mean = raw_train_features.mean(axis=(0, 1, 3))
+    std = raw_train_features.std(axis=(0, 1, 3))
     std = np.maximum(std, 1e-4)
-    train_features = _normalize(train_features, mean, std)
-    test_features = _normalize(test_features, mean, std)
+    train_features = _normalize(raw_train_features, mean, std)
+    test_features = _normalize(raw_test_features, mean, std)
 
     indices = np.arange(len(test_paths))
     strata = stratification_labels(test_paths, test_labels)
@@ -675,12 +838,24 @@ def train(args: argparse.Namespace) -> dict[str, object]:
     )
     device = _get_device(args.device)
     architecture = args.architecture
-    use_knn_normalization = architecture.endswith("_knn")
-    base_architecture = architecture.removesuffix("_knn")
+    use_normal_rank = architecture.endswith("_normal_rank")
+    architecture_without_rank = (
+        architecture.removesuffix("_normal_rank")
+        if use_normal_rank
+        else architecture
+    )
+    use_autoencoder_features = architecture_without_rank.endswith("_autoencoder")
+    architecture_without_autoencoder = (
+        architecture_without_rank.removesuffix("_autoencoder")
+        if use_autoencoder_features
+        else architecture_without_rank
+    )
+    use_knn_normalization = architecture_without_autoencoder.endswith("_knn")
+    model_architecture = architecture_without_autoencoder.removesuffix("_knn")
+    base_architecture = model_architecture
     base_architecture = (
         "large" if base_architecture in ("large", "large_pruned") else "small"
     )
-    model_architecture = architecture.removesuffix("_knn")
     prune_keep_fraction = (
         args.prune_keep_fraction if model_architecture == "large_pruned" else None
     )
@@ -691,6 +866,41 @@ def train(args: argparse.Namespace) -> dict[str, object]:
     )
     knn_reference_features = _prepare_model_features(train_features, base_architecture)
     test_model_features = _prepare_model_features(test_features, base_architecture)
+    autoencoder_extractor = None
+    autoencoder_state_dict = None
+    autoencoder_mean = None
+    autoencoder_std = None
+    normal_autoencoder_features = None
+    test_autoencoder_features = None
+    if use_autoencoder_features:
+        (
+            autoencoder_extractor,
+            autoencoder_mean,
+            autoencoder_std,
+            autoencoder_state_dict,
+        ) = _load_autoencoder_extractor(args.autoencoder_checkpoint, device)
+        normal_autoencoder_features = _autoencoder_features(
+            raw_train_features,
+            autoencoder_extractor,
+            autoencoder_mean,
+            autoencoder_std,
+            device,
+        )
+        test_autoencoder_features = _autoencoder_features(
+            raw_test_features,
+            autoencoder_extractor,
+            autoencoder_mean,
+            autoencoder_std,
+            device,
+        )
+        knn_reference_features = _stack_knn_features(
+            knn_reference_features, normal_autoencoder_features
+        )
+        test_knn_features = _stack_knn_features(
+            test_model_features, test_autoencoder_features
+        )
+    else:
+        test_knn_features = test_model_features
     fit_features = test_model_features[classifier_train_indices]
     fit_labels = test_labels[classifier_train_indices]
 
@@ -724,7 +934,15 @@ def train(args: argparse.Namespace) -> dict[str, object]:
     test_features = test_model_features
     hidden_dims = model.hidden_dims if isinstance(model, FeatureClassifier) else ()
     knn_reference_stats = (
-        _fit_knn_distance_reference(knn_reference_features, device)
+        _fit_knn_distance_reference(
+            knn_reference_features,
+            device,
+            feature_block_dims=(
+                (test_model_features.shape[1], test_autoencoder_features.shape[1])
+                if use_autoencoder_features
+                else None
+            ),
+        )
         if use_knn_normalization
         else None
     )
@@ -740,28 +958,52 @@ def train(args: argparse.Namespace) -> dict[str, object]:
     if knn_reference_stats is not None:
         threshold_scores = _apply_knn_score_normalization(
             threshold_scores,
-            test_features[threshold_indices],
+            test_knn_features[threshold_indices],
             knn_reference_stats,
             device,
         )
         evaluation_scores = _apply_knn_score_normalization(
             evaluation_scores,
-            test_features[evaluation_indices],
+            test_knn_features[evaluation_indices],
             knn_reference_stats,
             device,
         )
         classifier_train_scores = _apply_knn_score_normalization(
             classifier_train_scores,
-            test_features[classifier_train_indices],
+            test_knn_features[classifier_train_indices],
             knn_reference_stats,
             device,
         )
-    threshold, domain_thresholds, calibration_false_positives = _calibrate_thresholds(
+    rank_calibrator = _fit_normal_rank_calibrator(
         [test_paths[index] for index in threshold_indices],
         test_labels[threshold_indices],
         threshold_scores,
-        args.threshold_beta,
+        args.maximum_false_positive_rate,
     )
+    if use_normal_rank:
+        threshold_scores = _normal_rank_scores(
+            threshold_scores,
+            [test_paths[index] for index in threshold_indices],
+            rank_calibrator["overall_reference"],
+            rank_calibrator["references_by_domain"],
+        )
+        evaluation_scores = _normal_rank_scores(
+            evaluation_scores,
+            [test_paths[index] for index in evaluation_indices],
+            rank_calibrator["overall_reference"],
+            rank_calibrator["references_by_domain"],
+        )
+        classifier_train_scores = _normal_rank_scores(
+            classifier_train_scores,
+            [test_paths[index] for index in classifier_train_indices],
+            rank_calibrator["overall_reference"],
+            rank_calibrator["references_by_domain"],
+        )
+        threshold = float(rank_calibrator["overall_rank_threshold"])
+        domain_thresholds = rank_calibrator["rank_thresholds_by_domain"]
+    else:
+        threshold = float(rank_calibrator["overall_raw_threshold"])
+        domain_thresholds = rank_calibrator["raw_thresholds_by_domain"]
     threshold_validation_thresholds = np.array(
         [
             domain_thresholds.get(_domain(test_paths[index]), threshold)
@@ -781,6 +1023,11 @@ def train(args: argparse.Namespace) -> dict[str, object]:
     threshold_predictions = (
         threshold_scores >= threshold_validation_thresholds
     ).astype(np.int64)
+    calibration_false_positives = int(
+        np.count_nonzero(
+            (threshold_predictions == 1) & (test_labels[threshold_indices] == 0)
+        )
+    )
     report = {
         "model": "supervised deep log-mel statistics classifier",
         "architecture": architecture,
@@ -788,13 +1035,26 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         "threshold": threshold,
         "thresholds_by_domain": domain_thresholds,
         "threshold_optimization_metric": (
-            "maximum F-beta on threshold-validation clips per domain"
+            "maximum recall subject to calibration false-positive-rate < configured cap"
         ),
-        "threshold_optimization_beta": args.threshold_beta,
+        "maximum_false_positive_rate": args.maximum_false_positive_rate,
         "score_normalization": (
-            "k-nearest-normal distance odds adjustment"
+            "balanced raw/autoencoder kNN distance followed by empirical normal-validation rank"
+            if use_normal_rank and use_autoencoder_features
+            else "k-nearest-normal odds adjustment followed by empirical normal-validation rank"
+            if use_normal_rank and use_knn_normalization
+            else "empirical normal-validation rank"
+            if use_normal_rank
+            else "balanced raw/autoencoder kNN distance adjustment"
+            if use_autoencoder_features
+            else "k-nearest-normal training-distance odds adjustment"
             if use_knn_normalization
             else "none"
+        ),
+        "knn_feature_stack": (
+            "log-mel statistics + locally saved autoencoder latent mean/std"
+            if use_autoencoder_features
+            else "log-mel statistics"
         ),
         "threshold_calibrated_on": (
             "labeled threshold-validation subset of the calibration split"
@@ -814,7 +1074,9 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         "device": str(device),
         "classifier_fit_device": "cpu" if model_architecture == "rbf_svm" else str(device),
         "score_is_calibrated_probability": (
-            model_architecture != "rbf_svm" and not use_knn_normalization
+            model_architecture != "rbf_svm"
+            and not use_knn_normalization
+            and not use_normal_rank
         ),
     }
     report["calibration_false_positives_at_threshold"] = (
@@ -835,6 +1097,36 @@ def train(args: argparse.Namespace) -> dict[str, object]:
             "std": torch.from_numpy(std),
             "threshold": threshold,
             "thresholds_by_domain": domain_thresholds,
+            "normal_rank_calibrator": (
+                {
+                    "overall_reference": torch.from_numpy(
+                        rank_calibrator["overall_reference"].astype(np.float32)
+                    ),
+                    "references_by_domain": {
+                        domain: torch.from_numpy(reference.astype(np.float32))
+                        for domain, reference in rank_calibrator[
+                            "references_by_domain"
+                        ].items()
+                    },
+                    "overall_rank_threshold": rank_calibrator[
+                        "overall_rank_threshold"
+                    ],
+                    "rank_thresholds_by_domain": rank_calibrator[
+                        "rank_thresholds_by_domain"
+                    ],
+                }
+                if use_normal_rank
+                else None
+            ),
+            "autoencoder_feature_extractor": (
+                {
+                    "state_dict": autoencoder_state_dict,
+                    "mean": torch.from_numpy(autoencoder_mean),
+                    "std": torch.from_numpy(autoencoder_std),
+                }
+                if use_autoencoder_features
+                else None
+            ),
             "knn_normalizer": (
                 {
                     "mean": knn_reference_stats["mean"].detach().cpu(),
@@ -843,6 +1135,8 @@ def train(args: argparse.Namespace) -> dict[str, object]:
                     "baseline_distance": knn_reference_stats["baseline_distance"],
                     "neighbors": knn_reference_stats["neighbors"],
                     "alpha": knn_reference_stats["alpha"],
+                    "block_dims": knn_reference_stats["block_dims"],
+                    "block_scales": knn_reference_stats["block_scales"],
                 }
                 if knn_reference_stats is not None
                 else None
@@ -903,7 +1197,7 @@ def train(args: argparse.Namespace) -> dict[str, object]:
                 "file",
                 "domain",
                 "split",
-                "anomaly_probability",
+                "anomaly_score",
                 "threshold",
                 "margin_over_threshold",
                 "false_positive",
@@ -936,7 +1230,7 @@ def train(args: argparse.Namespace) -> dict[str, object]:
                 "file",
                 "label",
                 "split",
-                "anomaly_probability",
+                "anomaly_score",
                 "prediction",
                 "threshold",
             ]
@@ -984,6 +1278,7 @@ def _aggregate_fold_metrics(folds: list[dict[str, object]]) -> dict[str, object]
         )
         for name in (
             "roc_auc",
+            "partial_roc_auc_fpr_0_1",
             "average_precision",
             "accuracy",
             "balanced_accuracy",
@@ -1053,29 +1348,71 @@ def compare_models(args: argparse.Namespace) -> None:
     device = _get_device(args.device)
     features = _summarize_spectrograms(normalized_labeled)
     normal_features = _summarize_spectrograms(normalized_normal)
+    (
+        autoencoder_extractor,
+        autoencoder_mean,
+        autoencoder_std,
+        _,
+    ) = _load_autoencoder_extractor(args.autoencoder_checkpoint, device)
+    normal_autoencoder_features = _autoencoder_features(
+        raw_normal,
+        autoencoder_extractor,
+        autoencoder_mean,
+        autoencoder_std,
+        device,
+    )
+    labeled_autoencoder_features = _autoencoder_features(
+        raw_labeled,
+        autoencoder_extractor,
+        autoencoder_mean,
+        autoencoder_std,
+        device,
+    )
+    stacked_normal_features = _stack_knn_features(
+        normal_features, normal_autoencoder_features
+    )
+    stacked_labeled_features = _stack_knn_features(
+        features, labeled_autoencoder_features
+    )
     architecture_specs = {
         "small_calibration_only": (
             "small",
             np.empty((0, N_MELS * 10), dtype=np.float32),
+            False,
             False,
         ),
         "small_calibration_only_knn": (
             "small",
             np.empty((0, N_MELS * 10), dtype=np.float32),
             True,
+            False,
         ),
-        "small": ("small", normal_features, False),
-        "small_knn": ("small", normal_features, True),
-        "large": ("large", normal_features, False),
-        "large_knn": ("large", normal_features, True),
-        "rbf_svm": ("rbf_svm", normal_features, False),
-        "rbf_svm_knn": ("rbf_svm", normal_features, True),
+        "small": ("small", normal_features, False, False),
+        "small_knn": ("small", normal_features, True, False),
+        "small_knn_autoencoder": (
+            "small",
+            normal_features,
+            True,
+            True,
+        ),
+        "large": ("large", normal_features, False, False),
+        "large_knn": ("large", normal_features, True, False),
+        "rbf_svm": ("rbf_svm", normal_features, False, False),
+        "rbf_svm_knn": ("rbf_svm", normal_features, True, False),
     }
     fold_results: dict[str, list[dict[str, object]]] = {
         name: [] for name in architecture_specs
     }
     fp_rows: list[tuple[str, int, str, str, float, float]] = []
     knn_reference_stats = _fit_knn_distance_reference(normal_features, device)
+    stacked_knn_reference_stats = _fit_knn_distance_reference(
+        stacked_normal_features,
+        device,
+        feature_block_dims=(
+            normal_features.shape[1],
+            normal_autoencoder_features.shape[1],
+        ),
+    )
 
     for fold_number, (fold_train_relative, fold_eval_relative) in enumerate(
         splitter.split(calibration_indices, strata[calibration_indices]), start=1
@@ -1098,6 +1435,7 @@ def compare_models(args: argparse.Namespace) -> None:
             architecture,
             candidate_normal_features,
             use_knn_normalization,
+            use_autoencoder_features,
         ) in architecture_specs.items():
             if architecture.removesuffix("_knn") == "rbf_svm":
                 model = _fit_rbf_svm(
@@ -1124,24 +1462,48 @@ def compare_models(args: argparse.Namespace) -> None:
             )
             eval_scores = _probabilities(model, features[fold_eval_indices], device)
             if use_knn_normalization:
+                knn_features = (
+                    stacked_labeled_features
+                    if use_autoencoder_features
+                    else features
+                )
+                reference_stats = (
+                    stacked_knn_reference_stats
+                    if use_autoencoder_features
+                    else knn_reference_stats
+                )
                 calibration_scores = _apply_knn_score_normalization(
                     calibration_scores,
-                    features[threshold_indices],
-                    knn_reference_stats,
+                    knn_features[threshold_indices],
+                    reference_stats,
                     device,
                 )
                 eval_scores = _apply_knn_score_normalization(
                     eval_scores,
-                    features[fold_eval_indices],
-                    knn_reference_stats,
+                    knn_features[fold_eval_indices],
+                    reference_stats,
                     device,
                 )
-            threshold, domain_thresholds, calibration_fp_count = _calibrate_thresholds(
+            rank_calibrator = _fit_normal_rank_calibrator(
                 [labeled_paths[index] for index in threshold_indices],
                 labels[threshold_indices],
                 calibration_scores,
-                args.threshold_beta,
+                args.maximum_false_positive_rate,
             )
+            calibration_scores = _normal_rank_scores(
+                calibration_scores,
+                [labeled_paths[index] for index in threshold_indices],
+                rank_calibrator["overall_reference"],
+                rank_calibrator["references_by_domain"],
+            )
+            eval_scores = _normal_rank_scores(
+                eval_scores,
+                [labeled_paths[index] for index in fold_eval_indices],
+                rank_calibrator["overall_reference"],
+                rank_calibrator["references_by_domain"],
+            )
+            threshold = float(rank_calibrator["overall_rank_threshold"])
+            domain_thresholds = rank_calibrator["rank_thresholds_by_domain"]
             eval_thresholds = np.array(
                 [
                     domain_thresholds.get(_domain(labeled_paths[index]), threshold)
@@ -1149,6 +1511,20 @@ def compare_models(args: argparse.Namespace) -> None:
                 ]
             )
             eval_predictions = (eval_scores >= eval_thresholds).astype(np.int64)
+            calibration_thresholds = np.array(
+                [
+                    domain_thresholds.get(
+                        _domain(labeled_paths[index]), threshold
+                    )
+                    for index in threshold_indices
+                ]
+            )
+            calibration_fp_count = int(
+                np.count_nonzero(
+                    (calibration_scores >= calibration_thresholds)
+                    & (labels[threshold_indices] == 0)
+                )
+            )
             metrics = _metrics(fold_labels, eval_predictions, eval_scores)
             fold_results[candidate_name].append(
                 {
@@ -1181,7 +1557,8 @@ def compare_models(args: argparse.Namespace) -> None:
                         )
                     )
             print(
-                f"  {candidate_name}: F2={metrics['f2']:.3f}, "
+                f"  {candidate_name}: pAUC@0.1="
+                f"{metrics['partial_roc_auc_fpr_0_1']:.3f}, "
                 f"FP={metrics['false_positives']}, "
                 f"threshold-subset FP={calibration_fp_count}"
             )
@@ -1195,11 +1572,12 @@ def compare_models(args: argparse.Namespace) -> None:
         "small_calibration_only_knn",
         "small",
         "small_knn",
+        "small_knn_autoencoder",
     )
     baseline_name = max(
         small_candidates,
         key=lambda name: (
-            float(summaries[name]["pooled_f2"]),
+            float(summaries[name]["mean_fold_f1"]),
             -int(summaries[name]["false_positives"]),
         ),
     )
@@ -1209,14 +1587,14 @@ def compare_models(args: argparse.Namespace) -> None:
     consistent_candidates: list[str] = []
     for candidate_name in ("large", "large_knn", "rbf_svm", "rbf_svm_knn"):
         wins = sum(
-            float(candidate["metrics"]["f2"]) > float(small["metrics"]["f2"])
+            float(candidate["metrics"]["f1"]) > float(small["metrics"]["f1"])
             for small, candidate in zip(small_folds, fold_results[candidate_name])
         )
         model_wins[candidate_name] = wins
         if (
             wins >= required_wins
-            and float(summaries[candidate_name]["pooled_f2"])
-            > float(summaries[baseline_name]["pooled_f2"])
+            and float(summaries[candidate_name]["mean_fold_f1"])
+            > float(summaries[baseline_name]["mean_fold_f1"])
         ):
             consistent_candidates.append(candidate_name)
     large_consistent = "large" in consistent_candidates
@@ -1224,10 +1602,21 @@ def compare_models(args: argparse.Namespace) -> None:
 
     pruned_wins = False
     pruned_results: list[dict[str, object]] = []
-    pruned_f2_wins: int | None = None
+    pruned_f1_wins: int | None = None
     if large_consistent:
         print("Large MLP improved consistently; evaluating structured-pruned variant.")
         use_knn_for_pruned = baseline_name.endswith("_knn")
+        use_autoencoder_for_pruned = baseline_name.endswith("_autoencoder")
+        pruned_knn_reference_features = (
+            stacked_normal_features
+            if use_autoencoder_for_pruned
+            else normal_features
+        )
+        pruned_knn_reference_stats = (
+            stacked_knn_reference_stats
+            if use_autoencoder_for_pruned
+            else knn_reference_stats
+        )
         for fold_number, (fold_train_relative, fold_eval_relative) in enumerate(
             splitter.split(calibration_indices, strata[calibration_indices]), start=1
         ):
@@ -1257,29 +1646,62 @@ def compare_models(args: argparse.Namespace) -> None:
             )
             eval_scores = _probabilities(model, features[fold_eval_indices], device)
             if use_knn_for_pruned:
+                pruned_knn_features = (
+                    stacked_labeled_features
+                    if use_autoencoder_for_pruned
+                    else features
+                )
                 calibration_scores = _apply_knn_score_normalization(
                     calibration_scores,
-                    features[threshold_indices],
-                    knn_reference_stats,
+                    pruned_knn_features[threshold_indices],
+                    pruned_knn_reference_stats,
                     device,
                 )
                 eval_scores = _apply_knn_score_normalization(
                     eval_scores,
-                    features[fold_eval_indices],
-                    knn_reference_stats,
+                    pruned_knn_features[fold_eval_indices],
+                    pruned_knn_reference_stats,
                     device,
                 )
-            threshold, domain_thresholds, calibration_fp_count = _calibrate_thresholds(
+            rank_calibrator = _fit_normal_rank_calibrator(
                 [labeled_paths[index] for index in threshold_indices],
                 labels[threshold_indices],
                 calibration_scores,
-                args.threshold_beta,
+                args.maximum_false_positive_rate,
             )
+            calibration_scores = _normal_rank_scores(
+                calibration_scores,
+                [labeled_paths[index] for index in threshold_indices],
+                rank_calibrator["overall_reference"],
+                rank_calibrator["references_by_domain"],
+            )
+            eval_scores = _normal_rank_scores(
+                eval_scores,
+                [labeled_paths[index] for index in fold_eval_indices],
+                rank_calibrator["overall_reference"],
+                rank_calibrator["references_by_domain"],
+            )
+            threshold = float(rank_calibrator["overall_rank_threshold"])
+            domain_thresholds = rank_calibrator["rank_thresholds_by_domain"]
             eval_thresholds = np.array(
                 [
                     domain_thresholds.get(_domain(labeled_paths[index]), threshold)
                     for index in fold_eval_indices
                 ]
+            )
+            calibration_thresholds = np.array(
+                [
+                    domain_thresholds.get(
+                        _domain(labeled_paths[index]), threshold
+                    )
+                    for index in threshold_indices
+                ]
+            )
+            calibration_fp_count = int(
+                np.count_nonzero(
+                    (calibration_scores >= calibration_thresholds)
+                    & (labels[threshold_indices] == 0)
+                )
             )
             metrics = _metrics(
                 labels[fold_eval_indices],
@@ -1312,19 +1734,26 @@ def compare_models(args: argparse.Namespace) -> None:
                         )
                     )
             print(
-                f"  large_pruned: F2={metrics['f2']:.3f}, "
+                f"  large_pruned: pAUC@0.1="
+                f"{metrics['partial_roc_auc_fpr_0_1']:.3f}, "
                 f"FP={metrics['false_positives']}"
             )
-        pruned_name = "large_pruned_knn" if use_knn_for_pruned else "large_pruned"
+        pruned_name = (
+            "large_pruned_knn_autoencoder"
+            if use_knn_for_pruned and use_autoencoder_for_pruned
+            else "large_pruned_knn"
+            if use_knn_for_pruned
+            else "large_pruned"
+        )
         summaries[pruned_name] = _aggregate_fold_metrics(pruned_results)
-        pruned_f2_wins = sum(
-            float(pruned["metrics"]["f2"]) > float(small["metrics"]["f2"])
+        pruned_f1_wins = sum(
+            float(pruned["metrics"]["f1"]) > float(small["metrics"]["f1"])
             for small, pruned in zip(small_folds, pruned_results)
         )
         pruned_wins = (
-            pruned_f2_wins >= required_wins
-            and float(summaries[pruned_name]["pooled_f2"])
-            > float(summaries[baseline_name]["pooled_f2"])
+            pruned_f1_wins >= required_wins
+            and float(summaries[pruned_name]["mean_fold_f1"])
+            > float(summaries[baseline_name]["mean_fold_f1"])
         )
 
     eligible_candidates = [baseline_name]
@@ -1341,10 +1770,11 @@ def compare_models(args: argparse.Namespace) -> None:
     selected_architecture = max(
         eligible_candidates,
         key=lambda name: (
-            float(summaries[name]["pooled_f2"]),
+            float(summaries[name]["mean_fold_f1"]),
             -int(summaries[name]["false_positives"]),
         ),
     )
+    selected_architecture += "_normal_rank"
     report = {
         "comparison_method": (
             "stratified cross-validation within the calibration partition; "
@@ -1352,28 +1782,43 @@ def compare_models(args: argparse.Namespace) -> None:
         ),
         "folds": folds,
         "threshold_optimization_metric": (
-            f"F-beta (beta={args.threshold_beta}), calibrated on each fold's "
-            "threshold subset"
+            "maximum recall under the configured strict calibration FPR cap"
         ),
-        "model_selection_metric": "pooled cross-validated F2",
-        "threshold_beta": args.threshold_beta,
+        "model_selection_metric": "mean cross-validated harmonic mean (F1)",
+        "maximum_false_positive_rate": args.maximum_false_positive_rate,
+        "score_normalization": (
+            "empirical within-domain normal-score ranks, with global-reference fallback"
+        ),
         "knn_score_normalization": (
-            "odds adjusted by mean distance to 10 nearest normal training clips"
+            "mean-distance odds adjustment using standardized log-mel features; "
+            "optional balanced autoencoder latent block"
         ),
-        "large_model_f2_wins": model_wins["large"],
+        "autoencoder_feature_stack_candidate": {
+            "candidate": "small_knn_autoencoder",
+            "feature_blocks": [
+                "log-mel spectrogram summary",
+                "locally saved autoencoder latent mean and standard deviation",
+            ],
+            "selection_metric": "mean cross-validated harmonic mean (F1)",
+            "secondary_metrics": [
+                "standardized partial ROC AUC (max FPR=0.1)",
+                "pooled F1",
+            ],
+        },
+        "large_model_f1_wins": model_wins["large"],
         "required_consistent_fold_wins": required_wins,
         "large_model_consistently_better": large_consistent,
-        "large_knn_f2_wins": model_wins["large_knn"],
+        "large_knn_f1_wins": model_wins["large_knn"],
         "large_knn_consistently_better": "large_knn" in consistent_candidates,
-        "rbf_svm_f2_wins": model_wins["rbf_svm"],
+        "rbf_svm_f1_wins": model_wins["rbf_svm"],
         "rbf_svm_consistently_better": svm_consistent,
-        "rbf_svm_knn_f2_wins": model_wins["rbf_svm_knn"],
+        "rbf_svm_knn_f1_wins": model_wins["rbf_svm_knn"],
         "rbf_svm_knn_consistently_better": (
             "rbf_svm_knn" in consistent_candidates
         ),
         "best_small_training_strategy": baseline_name,
-        "pruned_model_f2_wins": (
-            pruned_f2_wins if large_consistent else None
+        "pruned_model_f1_wins": (
+            pruned_f1_wins if large_consistent else None
         ),
         "pruning_improvement_survives": pruned_wins if large_consistent else None,
         "selected_architecture": selected_architecture,
@@ -1390,7 +1835,7 @@ def compare_models(args: argparse.Namespace) -> None:
                 "fold",
                 "file",
                 "domain",
-                "anomaly_probability",
+                "anomaly_score",
                 "calibrated_threshold",
                 "false_positive",
             ]
@@ -1424,7 +1869,20 @@ def predict(args: argparse.Namespace) -> None:
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
     architecture = checkpoint.get("architecture", "small")
     hidden_dims = tuple(checkpoint.get("hidden_dims", ARCHITECTURES["small"]))
-    model_architecture = architecture.removesuffix("_knn")
+    use_normal_rank = architecture.endswith("_normal_rank")
+    architecture_without_rank = (
+        architecture.removesuffix("_normal_rank")
+        if use_normal_rank
+        else architecture
+    )
+    use_autoencoder_features = architecture_without_rank.endswith("_autoencoder")
+    architecture_without_autoencoder = (
+        architecture_without_rank.removesuffix("_autoencoder")
+        if use_autoencoder_features
+        else architecture_without_rank
+    )
+    model_architecture = architecture_without_autoencoder
+    model_architecture = model_architecture.removesuffix("_knn")
     base_architecture = (
         "large"
         if model_architecture in ("large", "large_pruned")
@@ -1446,6 +1904,24 @@ def predict(args: argparse.Namespace) -> None:
     std = checkpoint["std"].numpy()
     normalized = _prepare_model_features(_normalize(features, mean, std), base_architecture)
     scores = _probabilities(model, normalized, device)
+    knn_features = normalized
+    if use_autoencoder_features:
+        autoencoder_data = checkpoint.get("autoencoder_feature_extractor")
+        if autoencoder_data is None:
+            raise ValueError(
+                "The checkpoint architecture requires stored autoencoder features."
+            )
+        autoencoder_extractor = _build_autoencoder_extractor(
+            autoencoder_data["state_dict"], device
+        )
+        autoencoder_features = _autoencoder_features(
+            features,
+            autoencoder_extractor,
+            autoencoder_data["mean"].numpy(),
+            autoencoder_data["std"].numpy(),
+            device,
+        )
+        knn_features = _stack_knn_features(normalized, autoencoder_features)
     knn_normalizer = checkpoint.get("knn_normalizer")
     if knn_normalizer is not None:
         stats: dict[str, object] = {
@@ -1455,8 +1931,29 @@ def predict(args: argparse.Namespace) -> None:
             "baseline_distance": knn_normalizer["baseline_distance"],
             "neighbors": knn_normalizer["neighbors"],
             "alpha": knn_normalizer["alpha"],
+            "block_dims": tuple(knn_normalizer.get("block_dims", ())),
+            "block_scales": tuple(knn_normalizer.get("block_scales", ())),
         }
-        scores = _apply_knn_score_normalization(scores, normalized, stats, device)
+        if not stats["block_dims"]:
+            stats["block_dims"] = (knn_features.shape[1],)
+            stats["block_scales"] = (1.0,)
+        scores = _apply_knn_score_normalization(scores, knn_features, stats, device)
+    if use_normal_rank:
+        rank_calibrator = checkpoint.get("normal_rank_calibrator")
+        if rank_calibrator is None:
+            raise ValueError(
+                "The checkpoint architecture requires a normal-rank calibrator."
+            )
+        overall_reference = rank_calibrator["overall_reference"].numpy()
+        references_by_domain = {
+            domain: reference.numpy()
+            for domain, reference in rank_calibrator[
+                "references_by_domain"
+            ].items()
+        }
+        scores = _normal_rank_scores(
+            scores, args.files, overall_reference, references_by_domain
+        )
     threshold = float(checkpoint["threshold"])
     domain_thresholds = checkpoint.get("thresholds_by_domain", {})
     device_name = torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU"
@@ -1468,10 +1965,12 @@ def predict(args: argparse.Namespace) -> None:
             "threshold": path_threshold,
             "prediction": "anomaly" if score >= path_threshold else "normal",
         }
-        if model_architecture == "rbf_svm" or knn_normalizer is not None:
+        if model_architecture == "rbf_svm" or knn_normalizer is not None or use_normal_rank:
             result["anomaly_score"] = float(score)
             result["score_kind"] = (
-                "kNN distance-adjusted anomaly score"
+                "empirical normal-validation rank"
+                if use_normal_rank
+                else "kNN distance-adjusted anomaly score"
                 if knn_normalizer is not None
                 else "sigmoid-transformed SVM margin (not calibrated probability)"
             )
@@ -1498,6 +1997,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path(__file__).resolve().parent / "outputs",
     )
+    train_parser.add_argument(
+        "--autoencoder-checkpoint",
+        type=Path,
+        default=Path(__file__).resolve().parent
+        / "outputs"
+        / "bearing_autoencoder.pt",
+        help="saved in-domain autoencoder checkpoint used by the ensemble candidate",
+    )
     train_parser.add_argument("--epochs", type=int, default=40)
     train_parser.add_argument("--batch-size", type=int, default=32)
     train_parser.add_argument("--learning-rate", type=float, default=1e-3)
@@ -1517,16 +2024,27 @@ def build_parser() -> argparse.ArgumentParser:
             "large_pruned_knn",
             "rbf_svm",
             "rbf_svm_knn",
+            "small_normal_rank",
+            "small_knn_normal_rank",
+            "small_calibration_only_normal_rank",
+            "small_calibration_only_knn_normal_rank",
+            "large_normal_rank",
+            "large_knn_normal_rank",
+            "large_pruned_normal_rank",
+            "large_pruned_knn_normal_rank",
+            "rbf_svm_normal_rank",
+            "rbf_svm_knn_normal_rank",
+            "small_knn_autoencoder_normal_rank",
         ),
-        default="small",
-        help="classifier strategy with optional kNN score normalization",
+        default="small_normal_rank",
+        help="classifier strategy with optional kNN/autoencoder features and rank scaling",
     )
     train_parser.add_argument("--prune-keep-fraction", type=float, default=0.7)
     train_parser.add_argument(
-        "--threshold-beta",
+        "--maximum-false-positive-rate",
         type=float,
-        default=2.0,
-        help="F-beta used for threshold calibration; beta above 1 favors recall",
+        default=0.1,
+        help="strict upper bound for calibration normal false-positive rate",
     )
     train_parser.add_argument(
         "--device",
@@ -1537,7 +2055,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.set_defaults(handler=train)
 
     compare_parser = commands.add_parser(
-        "compare", help="compare model strategies by cross-validated F2"
+        "compare", help="compare model strategies by cross-validated harmonic mean"
     )
     compare_parser.add_argument(
         "--data-dir",
@@ -1549,6 +2067,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path(__file__).resolve().parent / "outputs",
     )
+    compare_parser.add_argument(
+        "--autoencoder-checkpoint",
+        type=Path,
+        default=Path(__file__).resolve().parent
+        / "outputs"
+        / "bearing_autoencoder.pt",
+        help="saved in-domain autoencoder checkpoint used by the ensemble candidate",
+    )
     compare_parser.add_argument("--epochs", type=int, default=40)
     compare_parser.add_argument("--batch-size", type=int, default=32)
     compare_parser.add_argument("--learning-rate", type=float, default=1e-3)
@@ -1559,10 +2085,10 @@ def build_parser() -> argparse.ArgumentParser:
     compare_parser.add_argument("--threshold-fraction", type=float, default=0.25)
     compare_parser.add_argument("--prune-keep-fraction", type=float, default=0.7)
     compare_parser.add_argument(
-        "--threshold-beta",
+        "--maximum-false-positive-rate",
         type=float,
-        default=2.0,
-        help="F-beta used for threshold calibration; beta above 1 favors recall",
+        default=0.1,
+        help="strict upper bound for calibration normal false-positive rate",
     )
     compare_parser.add_argument(
         "--device",
@@ -1594,8 +2120,10 @@ def main() -> None:
         raise ValueError("--folds must be at least 2.")
     if args.command == "compare" and not 0.1 <= args.threshold_fraction <= 0.5:
         raise ValueError("--threshold-fraction must be between 0.1 and 0.5.")
-    if args.command in ("train", "compare") and args.threshold_beta <= 0:
-        raise ValueError("--threshold-beta must be greater than 0.")
+    if args.command in ("train", "compare") and not (
+        0 < args.maximum_false_positive_rate < 1
+    ):
+        raise ValueError("--maximum-false-positive-rate must be between 0 and 1.")
     if args.command in ("train", "compare") and not 0.1 <= args.prune_keep_fraction < 1:
         raise ValueError("--prune-keep-fraction must be in [0.1, 1).")
     args.handler(args)
