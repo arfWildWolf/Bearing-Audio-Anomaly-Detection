@@ -15,7 +15,7 @@
 			"problemMatcher": []
 		},
 		{
-			"label": "Compare Models Under False-Positive Cap",
+			"label": "Compare Models by Cross-Validated F1",
 			"type": "shell",
 			"command": "${command:python.interpreterPath}",
 			"args": [

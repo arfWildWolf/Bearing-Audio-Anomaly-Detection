@@ -1,48 +1,51 @@
 {
   "comparison_method": "stratified cross-validation within the calibration partition; thresholds calibrated independently per fold",
-  "maximum_false_positive_rate": 0.05,
   "folds": 5,
-  "large_model_recall_wins": 1,
-  "large_model_required_wins": 4,
+  "threshold_optimization_metric": "F1, calibrated on each fold's threshold subset",
+  "model_selection_metric": "pooled cross-validated F1",
+  "large_model_f1_wins": 3,
+  "large_model_required_f1_wins": 4,
   "large_model_consistently_better": false,
   "best_small_training_strategy": "small",
-  "small_strategy_selection_constraint": "highest recall among candidates with pooled cross-validated false-positive rate at or below the configured cap; if none qualify, lowest false-positive rate then highest recall",
+  "pruned_model_f1_wins": null,
   "pruning_improvement_survives": null,
   "selected_architecture": "small",
   "cv_results": {
     "small_calibration_only": {
       "folds": 5,
-      "mean_fold_recall": 0.27142857142857146,
-      "pooled_recall": 0.2714285714285714,
-      "false_positives": 7,
-      "false_positive_rate": 0.1,
+      "mean_fold_f1": 0.6819621091679916,
+      "pooled_f1": 0.6826347305389222,
+      "mean_fold_recall": 0.8142857142857143,
+      "pooled_recall": 0.8142857142857143,
+      "false_positives": 40,
+      "false_positive_rate": 0.5714285714285714,
       "normal_clips": 70,
       "anomaly_clips": 70,
       "fold_metrics": [
         {
           "fold": 1,
-          "threshold": 0.9303318858146667,
+          "threshold": 0.23502488434314728,
           "thresholds_by_domain": {
-            "source": 0.9303318858146667,
-            "target": 0.933441698551178
+            "source": 0.1036057248711586,
+            "target": 0.23502488434314728
           },
-          "calibration_false_positives": 0,
+          "calibration_false_positives": 7,
           "calibration_normal_count": 14,
           "metrics": {
-            "f1": 0.3333333333333333,
-            "precision": 0.75,
-            "recall": 0.21428571428571427,
-            "false_positives": 1,
-            "true_positives": 3,
-            "false_positive_rate": 0.07142857142857142,
+            "f1": 0.7027027027027027,
+            "precision": 0.5652173913043478,
+            "recall": 0.9285714285714286,
+            "false_positives": 10,
+            "true_positives": 13,
+            "false_positive_rate": 0.7142857142857143,
             "confusion_matrix_normal_anomaly": [
               [
-                13,
-                1
+                4,
+                10
               ],
               [
-                11,
-                3
+                1,
+                13
               ]
             ],
             "samples": 28,
@@ -54,25 +57,25 @@
           "threshold": 0.817664623260498,
           "thresholds_by_domain": {
             "source": 0.817664623260498,
-            "target": 0.7409147024154663
+            "target": 0.06529349088668823
           },
-          "calibration_false_positives": 0,
+          "calibration_false_positives": 7,
           "calibration_normal_count": 14,
           "metrics": {
-            "f1": 0.6153846153846154,
-            "precision": 0.6666666666666666,
-            "recall": 0.5714285714285714,
-            "false_positives": 4,
-            "true_positives": 8,
-            "false_positive_rate": 0.2857142857142857,
+            "f1": 0.6470588235294118,
+            "precision": 0.55,
+            "recall": 0.7857142857142857,
+            "false_positives": 9,
+            "true_positives": 11,
+            "false_positive_rate": 0.6428571428571429,
             "confusion_matrix_normal_anomaly": [
               [
-                10,
-                4
+                5,
+                9
               ],
               [
-                6,
-                8
+                3,
+                11
               ]
             ],
             "samples": 28,
@@ -81,28 +84,28 @@
         },
         {
           "fold": 3,
-          "threshold": 0.773655116558075,
+          "threshold": 0.2626335024833679,
           "thresholds_by_domain": {
-            "source": 0.6684383749961853,
-            "target": 0.773655116558075
+            "source": 0.48179909586906433,
+            "target": 0.2626335024833679
           },
-          "calibration_false_positives": 0,
+          "calibration_false_positives": 10,
           "calibration_normal_count": 14,
           "metrics": {
-            "f1": 0.2222222222222222,
-            "precision": 0.5,
-            "recall": 0.14285714285714285,
-            "false_positives": 2,
-            "true_positives": 2,
-            "false_positive_rate": 0.14285714285714285,
+            "f1": 0.6875,
+            "precision": 0.6111111111111112,
+            "recall": 0.7857142857142857,
+            "false_positives": 7,
+            "true_positives": 11,
+            "false_positive_rate": 0.5,
             "confusion_matrix_normal_anomaly": [
               [
-                12,
-                2
+                7,
+                7
               ],
               [
-                12,
-                2
+                3,
+                11
               ]
             ],
             "samples": 28,
@@ -111,28 +114,28 @@
         },
         {
           "fold": 4,
-          "threshold": 0.8717451095581055,
+          "threshold": 0.596503496170044,
           "thresholds_by_domain": {
-            "source": 0.8717451095581055,
-            "target": 0.8367465734481812
+            "source": 0.3127625286579132,
+            "target": 0.596503496170044
           },
-          "calibration_false_positives": 0,
+          "calibration_false_positives": 8,
           "calibration_normal_count": 14,
           "metrics": {
-            "f1": 0.4444444444444444,
-            "precision": 1.0,
-            "recall": 0.2857142857142857,
-            "false_positives": 0,
-            "true_positives": 4,
-            "false_positive_rate": 0.0,
+            "f1": 0.7058823529411765,
+            "precision": 0.6,
+            "recall": 0.8571428571428571,
+            "false_positives": 8,
+            "true_positives": 12,
+            "false_positive_rate": 0.5714285714285714,
             "confusion_matrix_normal_anomaly": [
               [
-                14,
-                0
+                6,
+                8
               ],
               [
-                10,
-                4
+                2,
+                12
               ]
             ],
             "samples": 28,
@@ -141,28 +144,28 @@
         },
         {
           "fold": 5,
-          "threshold": 0.7206130623817444,
+          "threshold": 0.4215085506439209,
           "thresholds_by_domain": {
-            "source": 0.6588382720947266,
-            "target": 0.8093609809875488
+            "source": 0.4215085506439209,
+            "target": 0.33531031012535095
           },
-          "calibration_false_positives": 0,
+          "calibration_false_positives": 7,
           "calibration_normal_count": 14,
           "metrics": {
-            "f1": 0.25,
-            "precision": 1.0,
-            "recall": 0.14285714285714285,
-            "false_positives": 0,
-            "true_positives": 2,
-            "false_positive_rate": 0.0,
+            "f1": 0.6666666666666666,
+            "precision": 0.625,
+            "recall": 0.7142857142857143,
+            "false_positives": 6,
+            "true_positives": 10,
+            "false_positive_rate": 0.42857142857142855,
             "confusion_matrix_normal_anomaly": [
               [
-                14,
-                0
+                8,
+                6
               ],
               [
-                12,
-                2
+                4,
+                10
               ]
             ],
             "samples": 28,
@@ -173,37 +176,39 @@
     },
     "small": {
       "folds": 5,
-      "mean_fold_recall": 0.2571428571428571,
-      "pooled_recall": 0.2571428571428571,
-      "false_positives": 2,
-      "false_positive_rate": 0.02857142857142857,
+      "mean_fold_f1": 0.7152729199788024,
+      "pooled_f1": 0.7151515151515152,
+      "mean_fold_recall": 0.8428571428571429,
+      "pooled_recall": 0.8428571428571429,
+      "false_positives": 36,
+      "false_positive_rate": 0.5142857142857142,
       "normal_clips": 70,
       "anomaly_clips": 70,
       "fold_metrics": [
         {
           "fold": 1,
-          "threshold": 0.8477768898010254,
+          "threshold": 0.15810257196426392,
           "thresholds_by_domain": {
-            "source": 0.7115774154663086,
-            "target": 0.8477768898010254
+            "source": 0.1317717730998993,
+            "target": 0.25809431076049805
           },
-          "calibration_false_positives": 0,
+          "calibration_false_positives": 9,
           "calibration_normal_count": 14,
           "metrics": {
-            "f1": 0.35294117647058826,
-            "precision": 1.0,
-            "recall": 0.21428571428571427,
-            "false_positives": 0,
-            "true_positives": 3,
-            "false_positive_rate": 0.0,
+            "f1": 0.6470588235294118,
+            "precision": 0.55,
+            "recall": 0.7857142857142857,
+            "false_positives": 9,
+            "true_positives": 11,
+            "false_positive_rate": 0.6428571428571429,
             "confusion_matrix_normal_anomaly": [
               [
-                14,
-                0
+                5,
+                9
               ],
               [
-                11,
-                3
+                3,
+                11
               ]
             ],
             "samples": 28,
@@ -212,28 +217,28 @@
         },
         {
           "fold": 2,
-          "threshold": 0.9823909401893616,
+          "threshold": 0.01479041576385498,
           "thresholds_by_domain": {
-            "source": 0.9829482436180115,
-            "target": 0.9823909401893616
+            "source": 0.1172126829624176,
+            "target": 0.01479041576385498
           },
-          "calibration_false_positives": 0,
+          "calibration_false_positives": 9,
           "calibration_normal_count": 14,
           "metrics": {
-            "f1": 0.5263157894736842,
-            "precision": 1.0,
-            "recall": 0.35714285714285715,
-            "false_positives": 0,
-            "true_positives": 5,
-            "false_positive_rate": 0.0,
+            "f1": 0.7058823529411765,
+            "precision": 0.6,
+            "recall": 0.8571428571428571,
+            "false_positives": 8,
+            "true_positives": 12,
+            "false_positive_rate": 0.5714285714285714,
             "confusion_matrix_normal_anomaly": [
               [
-                14,
-                0
+                6,
+                8
               ],
               [
-                9,
-                5
+                2,
+                12
               ]
             ],
             "samples": 28,
@@ -242,28 +247,28 @@
         },
         {
           "fold": 3,
-          "threshold": 0.9495635032653809,
+          "threshold": 0.0608472041785717,
           "thresholds_by_domain": {
-            "source": 0.9495635032653809,
+            "source": 0.0608472041785717,
             "target": 0.8040821552276611
           },
-          "calibration_false_positives": 0,
+          "calibration_false_positives": 2,
           "calibration_normal_count": 14,
           "metrics": {
-            "f1": 0.2222222222222222,
-            "precision": 0.5,
-            "recall": 0.14285714285714285,
-            "false_positives": 2,
-            "true_positives": 2,
-            "false_positive_rate": 0.14285714285714285,
+            "f1": 0.6,
+            "precision": 0.5625,
+            "recall": 0.6428571428571429,
+            "false_positives": 7,
+            "true_positives": 9,
+            "false_positive_rate": 0.5,
             "confusion_matrix_normal_anomaly": [
               [
-                12,
-                2
+                7,
+                7
               ],
               [
-                12,
-                2
+                5,
+                9
               ]
             ],
             "samples": 28,
@@ -272,28 +277,28 @@
         },
         {
           "fold": 4,
-          "threshold": 0.9890502691268921,
+          "threshold": 0.009818607941269875,
           "thresholds_by_domain": {
-            "source": 0.9911589026451111,
-            "target": 0.9890502691268921
+            "source": 0.009818607941269875,
+            "target": 0.012375389225780964
           },
-          "calibration_false_positives": 0,
+          "calibration_false_positives": 3,
           "calibration_normal_count": 14,
           "metrics": {
-            "f1": 0.7272727272727273,
-            "precision": 1.0,
-            "recall": 0.5714285714285714,
-            "false_positives": 0,
-            "true_positives": 8,
-            "false_positive_rate": 0.0,
+            "f1": 0.8666666666666667,
+            "precision": 0.8125,
+            "recall": 0.9285714285714286,
+            "false_positives": 3,
+            "true_positives": 13,
+            "false_positive_rate": 0.21428571428571427,
             "confusion_matrix_normal_anomaly": [
               [
-                14,
-                0
+                11,
+                3
               ],
               [
-                6,
-                8
+                1,
+                13
               ]
             ],
             "samples": 28,
@@ -302,28 +307,28 @@
         },
         {
           "fold": 5,
-          "threshold": 0.9220334887504578,
+          "threshold": 0.0825025737285614,
           "thresholds_by_domain": {
-            "source": 0.9220334887504578,
-            "target": 0.9244334697723389
+            "source": 0.0825025737285614,
+            "target": 0.24384382367134094
           },
-          "calibration_false_positives": 0,
+          "calibration_false_positives": 13,
           "calibration_normal_count": 14,
           "metrics": {
-            "f1": 0.0,
-            "precision": 0.0,
-            "recall": 0.0,
-            "false_positives": 0,
-            "true_positives": 0,
-            "false_positive_rate": 0.0,
+            "f1": 0.7567567567567568,
+            "precision": 0.6086956521739131,
+            "recall": 1.0,
+            "false_positives": 9,
+            "true_positives": 14,
+            "false_positive_rate": 0.6428571428571429,
             "confusion_matrix_normal_anomaly": [
               [
-                14,
-                0
+                5,
+                9
               ],
               [
-                14,
-                0
+                0,
+                14
               ]
             ],
             "samples": 28,
@@ -334,37 +339,39 @@
     },
     "large": {
       "folds": 5,
-      "mean_fold_recall": 0.2571428571428571,
-      "pooled_recall": 0.2571428571428571,
-      "false_positives": 2,
-      "false_positive_rate": 0.02857142857142857,
+      "mean_fold_f1": 0.7343905304057106,
+      "pooled_f1": 0.7361963190184049,
+      "mean_fold_recall": 0.8571428571428571,
+      "pooled_recall": 0.8571428571428571,
+      "false_positives": 33,
+      "false_positive_rate": 0.4714285714285714,
       "normal_clips": 70,
       "anomaly_clips": 70,
       "fold_metrics": [
         {
           "fold": 1,
-          "threshold": 0.9590639472007751,
+          "threshold": 0.1810242384672165,
           "thresholds_by_domain": {
-            "source": 0.9480990767478943,
-            "target": 0.9590639472007751
+            "source": 0.1810242384672165,
+            "target": 0.732049286365509
           },
-          "calibration_false_positives": 0,
+          "calibration_false_positives": 4,
           "calibration_normal_count": 14,
           "metrics": {
-            "f1": 0.3157894736842105,
-            "precision": 0.6,
-            "recall": 0.21428571428571427,
-            "false_positives": 2,
-            "true_positives": 3,
-            "false_positive_rate": 0.14285714285714285,
+            "f1": 0.6428571428571429,
+            "precision": 0.6428571428571429,
+            "recall": 0.6428571428571429,
+            "false_positives": 5,
+            "true_positives": 9,
+            "false_positive_rate": 0.35714285714285715,
             "confusion_matrix_normal_anomaly": [
               [
-                12,
-                2
+                9,
+                5
               ],
               [
-                11,
-                3
+                5,
+                9
               ]
             ],
             "samples": 28,
@@ -373,28 +380,28 @@
         },
         {
           "fold": 2,
-          "threshold": 0.9924537539482117,
+          "threshold": 0.0020793394651263952,
           "thresholds_by_domain": {
-            "source": 0.9924537539482117,
-            "target": 0.9932030439376831
+            "source": 0.010699606500566006,
+            "target": 0.0020793394651263952
           },
-          "calibration_false_positives": 0,
+          "calibration_false_positives": 8,
           "calibration_normal_count": 14,
           "metrics": {
-            "f1": 0.5263157894736842,
-            "precision": 1.0,
-            "recall": 0.35714285714285715,
-            "false_positives": 0,
-            "true_positives": 5,
-            "false_positive_rate": 0.0,
+            "f1": 0.7741935483870968,
+            "precision": 0.7058823529411765,
+            "recall": 0.8571428571428571,
+            "false_positives": 5,
+            "true_positives": 12,
+            "false_positive_rate": 0.35714285714285715,
             "confusion_matrix_normal_anomaly": [
-              [
-                14,
-                0
-              ],
               [
                 9,
                 5
+              ],
+              [
+                2,
+                12
               ]
             ],
             "samples": 28,
@@ -403,28 +410,28 @@
         },
         {
           "fold": 3,
-          "threshold": 0.9615004658699036,
+          "threshold": 0.07686208188533783,
           "thresholds_by_domain": {
-            "source": 0.965973973274231,
-            "target": 0.9615004658699036
+            "source": 0.046971991658210754,
+            "target": 0.2840138077735901
           },
-          "calibration_false_positives": 0,
+          "calibration_false_positives": 9,
           "calibration_normal_count": 14,
           "metrics": {
-            "f1": 0.13333333333333333,
-            "precision": 1.0,
-            "recall": 0.07142857142857142,
-            "false_positives": 0,
-            "true_positives": 1,
-            "false_positive_rate": 0.0,
+            "f1": 0.6666666666666666,
+            "precision": 0.5454545454545454,
+            "recall": 0.8571428571428571,
+            "false_positives": 10,
+            "true_positives": 12,
+            "false_positive_rate": 0.7142857142857143,
             "confusion_matrix_normal_anomaly": [
               [
-                14,
-                0
+                4,
+                10
               ],
               [
-                13,
-                1
+                2,
+                12
               ]
             ],
             "samples": 28,
@@ -433,28 +440,28 @@
         },
         {
           "fold": 4,
-          "threshold": 0.9975765347480774,
+          "threshold": 0.06373009830713272,
           "thresholds_by_domain": {
-            "source": 0.9969084858894348,
-            "target": 0.9975765347480774
+            "source": 0.06373009830713272,
+            "target": 0.0010230547050014138
           },
-          "calibration_false_positives": 0,
+          "calibration_false_positives": 3,
           "calibration_normal_count": 14,
           "metrics": {
-            "f1": 0.6666666666666666,
-            "precision": 1.0,
-            "recall": 0.5,
-            "false_positives": 0,
-            "true_positives": 7,
-            "false_positive_rate": 0.0,
+            "f1": 0.7647058823529411,
+            "precision": 0.65,
+            "recall": 0.9285714285714286,
+            "false_positives": 7,
+            "true_positives": 13,
+            "false_positive_rate": 0.5,
             "confusion_matrix_normal_anomaly": [
-              [
-                14,
-                0
-              ],
               [
                 7,
                 7
+              ],
+              [
+                1,
+                13
               ]
             ],
             "samples": 28,
@@ -463,28 +470,28 @@
         },
         {
           "fold": 5,
-          "threshold": 0.6653300523757935,
+          "threshold": 0.07927018404006958,
           "thresholds_by_domain": {
-            "source": 0.18080204725265503,
-            "target": 0.6653300523757935
+            "source": 0.03682556003332138,
+            "target": 0.12293531000614166
           },
-          "calibration_false_positives": 0,
+          "calibration_false_positives": 9,
           "calibration_normal_count": 14,
           "metrics": {
-            "f1": 0.25,
-            "precision": 1.0,
-            "recall": 0.14285714285714285,
-            "false_positives": 0,
-            "true_positives": 2,
-            "false_positive_rate": 0.0,
+            "f1": 0.8235294117647058,
+            "precision": 0.7,
+            "recall": 1.0,
+            "false_positives": 6,
+            "true_positives": 14,
+            "false_positive_rate": 0.42857142857142855,
             "confusion_matrix_normal_anomaly": [
               [
-                14,
-                0
+                8,
+                6
               ],
               [
-                12,
-                2
+                0,
+                14
               ]
             ],
             "samples": 28,
@@ -496,20 +503,20 @@
   },
   "final_evaluation_reserved": 60,
   "final_held_out_evaluation": {
-    "f1": 0.2777777777777778,
-    "precision": 0.8333333333333334,
-    "recall": 0.16666666666666666,
-    "false_positives": 1,
-    "true_positives": 5,
-    "false_positive_rate": 0.03333333333333333,
+    "f1": 0.6,
+    "precision": 0.75,
+    "recall": 0.5,
+    "false_positives": 5,
+    "true_positives": 15,
+    "false_positive_rate": 0.16666666666666666,
     "confusion_matrix_normal_anomaly": [
-      [
-        29,
-        1
-      ],
       [
         25,
         5
+      ],
+      [
+        15,
+        15
       ]
     ],
     "samples": 60,

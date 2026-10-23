@@ -38,25 +38,25 @@ python bearing_anomaly.py train
 ```
 
 To compare training with and without the extra normal training recordings, as
-well as the larger classifier, under the same 5% calibration false-positive
-rate cap, use:
+well as the larger classifier, by cross-validated F1, use:
 
 ```powershell
 python bearing_anomaly.py compare --device cuda
 ```
 
 This compares three candidates on stratified folds drawn only from the
-calibration partition and keeps the final evaluation partition untouched. It
-selects between the small classifier trained only on labeled calibration clips
-and the same classifier additionally trained with the normal recordings,
-preferring the highest-recall strategy whose pooled validation false-positive
-rate is within the configured cap. The larger model is selected only if it
-beats the better small-model strategy on recall in at least 80% of folds,
-without increasing false positives, and stays within the same pooled
-false-positive-rate cap. Only then is a 30%-width structured-pruned model
-evaluated; pruning is selected only if its recall gain over that small-model
-baseline survives at no greater false-positive count and within the cap. The
-selected model is then trained and evaluated on the reserved holdout.
+calibration partition and keeps the final evaluation partition untouched.
+Thresholds are selected to maximize F1 on a separate calibration subset, with
+separate thresholds for `source` and `target` when both classes are represented
+in that domain. The small-model strategy with the highest pooled cross-validated
+F1 is selected as the baseline (breaking ties toward fewer false positives).
+The larger model is selected only if it improves F1 in at least 80% of folds
+and improves pooled F1. Only then is a 30%-width structured-pruned model
+evaluated; pruning is selected only if its F1 improvement over that baseline
+also survives in at least 80% of folds and improves pooled F1. No false-positive
+rate cap is applied in this F1-optimization mode; precision, recall, and false
+positives remain reported for transparency. The selected model is then trained
+and evaluated on the reserved holdout.
 
 The VS Code task **Train Bearing Anomaly Detector** explicitly requests CUDA.
 The CLI defaults to `--device auto`, which uses CUDA when available; use
@@ -66,16 +66,14 @@ or `--device cpu` to force CPU execution.
 The default run uses normal clips from `bearing/train`. It splits labeled files
 in `bearing/test` into a calibration subset and a held-out evaluation subset.
 Some calibration clips train the classifier; a separate calibration portion
-sets thresholds to maximize recall while limiting the calibration false-positive
-rate to 5% (`--maximum-false-positive-rate`), with separate thresholds for the
-`source` and `target` domains when identified in the filename. Set the cap to
-`0` to allow no false positives on each calibration domain. Threshold
-selection uses calibration labels only; held-out evaluation
-labels do not affect the model or threshold. The report includes held-out
-false-positive count and rate, which can differ from calibration because of
-sampling variation. This is a supervised detector because anomaly examples
-from the calibration split are used during training. Set `--seed` to reproduce
-a run.
+sets thresholds to maximize F1, with separate thresholds for the `source` and
+`target` domains when identified in the filename. Threshold selection uses
+calibration labels only; held-out evaluation labels do not affect the model or
+threshold. The report includes held-out precision, recall, F1, false-positive
+count, and rate, which can differ from calibration because of sampling
+variation. F1 optimization does not guarantee a low false-positive rate. This
+is a supervised detector because anomaly examples from the calibration split
+are used during training. Set `--seed` to reproduce a run.
 
 The trained model and evaluation artifacts are saved under `outputs/`:
 
@@ -88,10 +86,8 @@ The trained model and evaluation artifacts are saved under `outputs/`:
 - `false_positive_review.csv` — held-out and threshold-validation normal clips
   sorted by distance above/below the decision threshold
 
-Use `--data-dir`, `--output-dir`, `--epochs`, `--evaluation-fraction`, or
-`--maximum-false-positive-rate` to override defaults. A strict false-positive
-cap may reduce recall, and the calibration cap cannot guarantee the same
-false-positive rate on future recordings.
+Use `--data-dir`, `--output-dir`, `--epochs`, or `--evaluation-fraction` to
+override defaults.
 
 ## Score new recordings
 
@@ -102,4 +98,4 @@ python bearing_anomaly.py predict --device cuda --checkpoint outputs/bearing_cla
 Predictions are printed as JSON lines. `--device auto` runs on CUDA when
 available and otherwise falls back to CPU. With `--device cuda`, it requires
 CUDA and reports an error rather than falling back. The detector applies the
-same false-positive-conscious threshold to each recording.
+threshold selected to maximize F1 on the calibration subset.

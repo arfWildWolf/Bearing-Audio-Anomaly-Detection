@@ -220,32 +220,23 @@ def _probabilities(
     return np.concatenate(probabilities)
 
 
-def _recall_at_maximum_false_positive_rate(
-    labels: np.ndarray, scores: np.ndarray, maximum_false_positive_rate: float
+def _maximum_f1_threshold(
+    labels: np.ndarray, scores: np.ndarray
 ) -> tuple[float, int]:
-    normal_count = int(np.count_nonzero(labels == 0))
-    if normal_count == 0:
-        raise ValueError("Threshold calibration requires normal clips.")
-    maximum_false_positives = int(
-        np.floor(maximum_false_positive_rate * normal_count)
-    )
     candidates = np.concatenate(
         [np.nextafter(np.max(scores), np.inf).reshape(1), np.unique(scores)]
     )
-    feasible: list[tuple[float, int, float]] = []
-    anomaly_count = int(np.count_nonzero(labels == 1))
+    candidates_by_f1: list[tuple[float, int, float]] = []
     for threshold in candidates:
         predictions = scores >= threshold
         false_positives = int(np.count_nonzero(predictions & (labels == 0)))
-        if false_positives > maximum_false_positives:
-            continue
         true_positives = int(np.count_nonzero(predictions & (labels == 1)))
-        recall = true_positives / anomaly_count if anomaly_count else 0.0
-        feasible.append((recall, false_positives, float(threshold)))
-    if not feasible:
-        raise RuntimeError("Could not find a threshold under the false-positive cap.")
-    recall, false_positives, threshold = max(
-        feasible, key=lambda result: (result[0], -result[1], result[2])
+        false_negatives = int(np.count_nonzero(~predictions & (labels == 1)))
+        denominator = 2 * true_positives + false_positives + false_negatives
+        f1 = 2 * true_positives / denominator if denominator else 0.0
+        candidates_by_f1.append((f1, false_positives, float(threshold)))
+    f1, false_positives, threshold = max(
+        candidates_by_f1, key=lambda result: (result[0], -result[1], result[2])
     )
     return threshold, false_positives
 
@@ -254,23 +245,16 @@ def _calibrate_thresholds(
     paths: list[Path],
     labels: np.ndarray,
     scores: np.ndarray,
-    maximum_false_positive_rate: float,
 ) -> tuple[float, dict[str, float], int]:
-    overall_threshold, overall_false_positives = (
-        _recall_at_maximum_false_positive_rate(
-            labels, scores, maximum_false_positive_rate
-        )
-    )
+    overall_threshold, overall_false_positives = _maximum_f1_threshold(labels, scores)
     thresholds: dict[str, float] = {}
     domain_false_positives = 0
     for domain in ("source", "target"):
         mask = np.array([_domain(path) == domain for path in paths])
         if not mask.any() or not np.any(labels[mask] == 0) or not np.any(labels[mask] == 1):
             continue
-        thresholds[domain], false_positives = (
-            _recall_at_maximum_false_positive_rate(
-                labels[mask], scores[mask], maximum_false_positive_rate
-            )
+        thresholds[domain], false_positives = _maximum_f1_threshold(
+            labels[mask], scores[mask]
         )
         domain_false_positives += false_positives
     return (
@@ -528,13 +512,10 @@ def train(args: argparse.Namespace) -> dict[str, object]:
     threshold_scores = _probabilities(
         model, test_features[threshold_indices], device
     )
-    threshold, domain_thresholds, calibration_false_positives = (
-        _calibrate_thresholds(
-            [test_paths[index] for index in threshold_indices],
-            test_labels[threshold_indices],
-            threshold_scores,
-            args.maximum_false_positive_rate,
-        )
+    threshold, domain_thresholds, calibration_false_positives = _calibrate_thresholds(
+        [test_paths[index] for index in threshold_indices],
+        test_labels[threshold_indices],
+        threshold_scores,
     )
     threshold_validation_thresholds = np.array(
         [
@@ -564,10 +545,7 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         "hidden_dims": list(hidden_dims),
         "threshold": threshold,
         "thresholds_by_domain": domain_thresholds,
-        "threshold_optimization_metric": (
-            "maximum recall subject to per-domain calibrated false-positive-rate cap"
-        ),
-        "maximum_false_positive_rate": args.maximum_false_positive_rate,
+        "threshold_optimization_metric": "maximum F1 on threshold-validation clips per domain",
         "threshold_calibrated_on": (
             "labeled threshold-validation subset of the calibration split"
         ),
@@ -582,23 +560,6 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         "evaluation_fraction": args.evaluation_fraction,
         "seed": args.seed,
         "device": str(device),
-    }
-    report["calibration_false_positive_limit_by_domain"] = {
-        domain: int(
-            np.floor(
-                args.maximum_false_positive_rate
-                * np.count_nonzero(
-                    np.array(
-                        [
-                            _domain(test_paths[index]) == domain
-                            for index in threshold_indices
-                        ]
-                    )
-                    & (test_labels[threshold_indices] == 0)
-                )
-            )
-        )
-        for domain in domain_thresholds
     }
     report["calibration_false_positives_at_threshold"] = (
         calibration_false_positives
@@ -727,10 +688,6 @@ def train(args: argparse.Namespace) -> dict[str, object]:
             )
 
     print(f"\nEvaluation (held-out labeled clips): {json.dumps(report['evaluation'])}")
-    print(
-        "Calibration false-positive caps: "
-        f"{report['calibration_false_positive_limit_by_domain']}"
-    )
     print(f"Calibration false positives: {calibration_false_positives}")
     print(f"Threshold: {threshold:.8f}")
     print(f"Saved model: {checkpoint_path}")
@@ -745,8 +702,16 @@ def _aggregate_fold_metrics(folds: list[dict[str, object]]) -> dict[str, object]
     false_positives = sum(int(fold["metrics"]["false_positives"]) for fold in folds)
     true_positives = sum(int(fold["metrics"]["true_positives"]) for fold in folds)
     normal_count = sample_count - anomaly_count
+    false_negatives = anomaly_count - true_positives
+    f1_denominator = 2 * true_positives + false_positives + false_negatives
     return {
         "folds": len(folds),
+        "mean_fold_f1": float(
+            np.mean([float(fold["metrics"]["f1"]) for fold in folds])
+        ),
+        "pooled_f1": (
+            2 * true_positives / f1_denominator if f1_denominator else 0.0
+        ),
         "mean_fold_recall": float(
             np.mean([float(fold["metrics"]["recall"]) for fold in folds])
         ),
@@ -840,13 +805,10 @@ def compare_models(args: argparse.Namespace) -> None:
             calibration_scores = _probabilities(
                 model, features[threshold_indices], device
             )
-            threshold, domain_thresholds, calibration_fp_count = (
-                _calibrate_thresholds(
-                    [labeled_paths[index] for index in threshold_indices],
-                    labels[threshold_indices],
-                    calibration_scores,
-                    args.maximum_false_positive_rate,
-                )
+            threshold, domain_thresholds, calibration_fp_count = _calibrate_thresholds(
+                [labeled_paths[index] for index in threshold_indices],
+                labels[threshold_indices],
+                calibration_scores,
             )
             eval_scores = _probabilities(model, features[fold_eval_indices], device)
             eval_thresholds = np.array(
@@ -888,7 +850,7 @@ def compare_models(args: argparse.Namespace) -> None:
                         )
                     )
             print(
-                f"  {candidate_name}: recall={metrics['recall']:.3f}, "
+                f"  {candidate_name}: F1={metrics['f1']:.3f}, "
                 f"FP={metrics['false_positives']}, "
                 f"calibration FP={calibration_fp_count}"
             )
@@ -898,42 +860,24 @@ def compare_models(args: argparse.Namespace) -> None:
         for name, results in fold_results.items()
     }
     small_candidates = ("small_calibration_only", "small")
-    eligible_small_candidates = [
-        name
-        for name in small_candidates
-        if float(summaries[name]["false_positive_rate"])
-        <= args.maximum_false_positive_rate
-    ]
-    baseline_name = (
-        max(
-            eligible_small_candidates,
-            key=lambda name: (
-                float(summaries[name]["pooled_recall"]),
-                -int(summaries[name]["false_positives"]),
-            ),
-        )
-        if eligible_small_candidates
-        else min(
-            small_candidates,
-            key=lambda name: (
-                float(summaries[name]["false_positive_rate"]),
-                -float(summaries[name]["pooled_recall"]),
-            ),
-        )
+    baseline_name = max(
+        small_candidates,
+        key=lambda name: (
+            float(summaries[name]["pooled_f1"]),
+            -int(summaries[name]["false_positives"]),
+        ),
     )
     small_folds = fold_results[baseline_name]
     large_folds = fold_results["large"]
-    large_wins = sum(
-        float(large["metrics"]["recall"]) > float(small["metrics"]["recall"])
+    large_f1_wins = sum(
+        float(large["metrics"]["f1"]) > float(small["metrics"]["f1"])
         for small, large in zip(small_folds, large_folds)
     )
     required_wins = int(np.ceil(0.8 * folds))
     large_consistent = (
-        large_wins >= required_wins
-        and int(summaries["large"]["false_positives"])
-        <= int(summaries[baseline_name]["false_positives"])
-        and float(summaries["large"]["false_positive_rate"])
-        <= args.maximum_false_positive_rate
+        large_f1_wins >= required_wins
+        and float(summaries["large"]["pooled_f1"])
+        > float(summaries[baseline_name]["pooled_f1"])
     )
 
     pruned_wins = False
@@ -967,13 +911,10 @@ def compare_models(args: argparse.Namespace) -> None:
             calibration_scores = _probabilities(
                 model, features[threshold_indices], device
             )
-            threshold, domain_thresholds, calibration_fp_count = (
-                _calibrate_thresholds(
-                    [labeled_paths[index] for index in threshold_indices],
-                    labels[threshold_indices],
-                    calibration_scores,
-                    args.maximum_false_positive_rate,
-                )
+            threshold, domain_thresholds, calibration_fp_count = _calibrate_thresholds(
+                [labeled_paths[index] for index in threshold_indices],
+                labels[threshold_indices],
+                calibration_scores,
             )
             eval_scores = _probabilities(model, features[fold_eval_indices], device)
             eval_thresholds = np.array(
@@ -1012,17 +953,18 @@ def compare_models(args: argparse.Namespace) -> None:
                         )
                     )
             print(
-                f"  large_pruned: recall={metrics['recall']:.3f}, "
+                f"  large_pruned: F1={metrics['f1']:.3f}, "
                 f"FP={metrics['false_positives']}"
             )
         summaries["large_pruned"] = _aggregate_fold_metrics(pruned_results)
+        pruned_f1_wins = sum(
+            float(pruned["metrics"]["f1"]) > float(small["metrics"]["f1"])
+            for small, pruned in zip(small_folds, pruned_results)
+        )
         pruned_wins = (
-            float(summaries["large_pruned"]["pooled_recall"])
-            > float(summaries[baseline_name]["pooled_recall"])
-            and int(summaries["large_pruned"]["false_positives"])
-            <= int(summaries[baseline_name]["false_positives"])
-            and float(summaries["large_pruned"]["false_positive_rate"])
-            <= args.maximum_false_positive_rate
+            pruned_f1_wins >= required_wins
+            and float(summaries["large_pruned"]["pooled_f1"])
+            > float(summaries[baseline_name]["pooled_f1"])
         )
 
     selected_architecture = (
@@ -1037,16 +979,15 @@ def compare_models(args: argparse.Namespace) -> None:
             "stratified cross-validation within the calibration partition; "
             "thresholds calibrated independently per fold"
         ),
-        "maximum_false_positive_rate": args.maximum_false_positive_rate,
         "folds": folds,
-        "large_model_recall_wins": large_wins,
-        "large_model_required_wins": required_wins,
+        "threshold_optimization_metric": "F1, calibrated on each fold's threshold subset",
+        "model_selection_metric": "pooled cross-validated F1",
+        "large_model_f1_wins": large_f1_wins,
+        "large_model_required_f1_wins": required_wins,
         "large_model_consistently_better": large_consistent,
         "best_small_training_strategy": baseline_name,
-        "small_strategy_selection_constraint": (
-            "highest recall among candidates with pooled cross-validated "
-            "false-positive rate at or below the configured cap; if none "
-            "qualify, lowest false-positive rate then highest recall"
+        "pruned_model_f1_wins": (
+            pruned_f1_wins if large_consistent else None
         ),
         "pruning_improvement_survives": pruned_wins if large_consistent else None,
         "selected_architecture": selected_architecture,
@@ -1159,12 +1100,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     train_parser.add_argument("--prune-keep-fraction", type=float, default=0.7)
     train_parser.add_argument(
-        "--maximum-false-positive-rate",
-        type=float,
-        default=0.05,
-        help="maximum calibration false-positive rate allowed when choosing the threshold",
-    )
-    train_parser.add_argument(
         "--device",
         choices=("auto", "cpu", "cuda"),
         default="auto",
@@ -1173,7 +1108,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.set_defaults(handler=train)
 
     compare_parser = commands.add_parser(
-        "compare", help="compare model sizes at a fixed false-positive-rate cap"
+        "compare", help="compare model training strategies by cross-validated F1"
     )
     compare_parser.add_argument(
         "--data-dir",
@@ -1194,12 +1129,6 @@ def build_parser() -> argparse.ArgumentParser:
     compare_parser.add_argument("--folds", type=int, default=5)
     compare_parser.add_argument("--threshold-fraction", type=float, default=0.25)
     compare_parser.add_argument("--prune-keep-fraction", type=float, default=0.7)
-    compare_parser.add_argument(
-        "--maximum-false-positive-rate",
-        type=float,
-        default=0.05,
-        help="maximum calibration false-positive rate allowed when choosing the threshold",
-    )
     compare_parser.add_argument(
         "--device",
         choices=("auto", "cpu", "cuda"),
@@ -1226,8 +1155,6 @@ def main() -> None:
     args = build_parser().parse_args()
     if args.command in ("train", "compare") and not 0.1 <= args.evaluation_fraction <= 0.8:
         raise ValueError("--evaluation-fraction must be between 0.1 and 0.8.")
-    if args.command in ("train", "compare") and not 0 <= args.maximum_false_positive_rate <= 1:
-        raise ValueError("--maximum-false-positive-rate must be between 0 and 1.")
     if args.command == "compare" and args.folds < 2:
         raise ValueError("--folds must be at least 2.")
     if args.command == "compare" and not 0.1 <= args.threshold_fraction <= 0.5:
