@@ -2,8 +2,9 @@
 
 This project trains a compact deep neural network locally to detect bearing
 anomalies from log-mel audio spectrogram statistics. It uses normal training
-recordings to normalize audio features and a labeled calibration subset to train
-the classifier. The remaining labeled test clips are held out for evaluation.
+recordings as labeled normal examples and uses a labeled calibration subset to
+train the classifier. A separate labeled subset calibrates its threshold, and
+the remaining test clips are held out for evaluation.
 
 ## Setup
 
@@ -36,6 +37,27 @@ bearing/
 python bearing_anomaly.py train
 ```
 
+To compare training with and without the extra normal training recordings, as
+well as the larger classifier, under the same 5% calibration false-positive
+rate cap, use:
+
+```powershell
+python bearing_anomaly.py compare --device cuda
+```
+
+This compares three candidates on stratified folds drawn only from the
+calibration partition and keeps the final evaluation partition untouched. It
+selects between the small classifier trained only on labeled calibration clips
+and the same classifier additionally trained with the normal recordings,
+preferring the highest-recall strategy whose pooled validation false-positive
+rate is within the configured cap. The larger model is selected only if it
+beats the better small-model strategy on recall in at least 80% of folds,
+without increasing false positives, and stays within the same pooled
+false-positive-rate cap. Only then is a 30%-width structured-pruned model
+evaluated; pruning is selected only if its recall gain over that small-model
+baseline survives at no greater false-positive count and within the cap. The
+selected model is then trained and evaluated on the reserved holdout.
+
 The VS Code task **Train Bearing Anomaly Detector** explicitly requests CUDA.
 The CLI defaults to `--device auto`, which uses CUDA when available; use
 `--device cuda` to require a GPU (it errors rather than silently falling back),
@@ -44,11 +66,13 @@ or `--device cpu` to force CPU execution.
 The default run uses normal clips from `bearing/train`. It splits labeled files
 in `bearing/test` into a calibration subset and a held-out evaluation subset.
 Some calibration clips train the classifier; a separate calibration portion
-sets the threshold to maximize recall while maintaining precision of at least
-0.70. Override the precision target with `--minimum-precision`. Threshold
-selection uses calibration labels only; the evaluation labels are never used
-for model fitting or threshold selection. The held-out report includes
-precision and recall, which may differ from the calibration target due to
+sets thresholds to maximize recall while limiting the calibration false-positive
+rate to 5% (`--maximum-false-positive-rate`), with separate thresholds for the
+`source` and `target` domains when identified in the filename. Set the cap to
+`0` to allow no false positives on each calibration domain. Threshold
+selection uses calibration labels only; held-out evaluation
+labels do not affect the model or threshold. The report includes held-out
+false-positive count and rate, which can differ from calibration because of
 sampling variation. This is a supervised detector because anomaly examples
 from the calibration split are used during training. Set `--seed` to reproduce
 a run.
@@ -58,11 +82,16 @@ The trained model and evaluation artifacts are saved under `outputs/`:
 - `bearing_classifier.pt` — model weights, normalization values, and threshold
 - `metrics.json` — held-out precision, recall, F1, and confusion matrix
 - `scores.csv` — per-file anomaly scores, predictions, and split assignments
+- `model_comparison.json` — cross-validation results for each model candidate
+- `cross_validation_false_positives.csv` — normal validation clips flagged by
+  each candidate, with their scores and fold thresholds
+- `false_positive_review.csv` — held-out and threshold-validation normal clips
+  sorted by distance above/below the decision threshold
 
 Use `--data-dir`, `--output-dir`, `--epochs`, `--evaluation-fraction`, or
-`--minimum-precision` to override defaults. Performance depends on the
-recordings and held-out split; a calibration precision constraint cannot
-guarantee the same precision on future data.
+`--maximum-false-positive-rate` to override defaults. A strict false-positive
+cap may reduce recall, and the calibration cap cannot guarantee the same
+false-positive rate on future recordings.
 
 ## Score new recordings
 
@@ -72,6 +101,5 @@ python bearing_anomaly.py predict --device cuda --checkpoint outputs/bearing_cla
 
 Predictions are printed as JSON lines. `--device auto` runs on CUDA when
 available and otherwise falls back to CPU. With `--device cuda`, it requires
-CUDA and reports an error rather than falling back. When a filename contains
-`_source_` or `_target_`, the corresponding calibrated threshold is used;
-otherwise the overall threshold is used.
+CUDA and reports an error rather than falling back. The detector applies the
+same false-positive-conscious threshold to each recording.

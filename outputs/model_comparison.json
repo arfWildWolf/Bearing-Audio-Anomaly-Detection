@@ -1,0 +1,518 @@
+{
+  "comparison_method": "stratified cross-validation within the calibration partition; thresholds calibrated independently per fold",
+  "maximum_false_positive_rate": 0.05,
+  "folds": 5,
+  "large_model_recall_wins": 1,
+  "large_model_required_wins": 4,
+  "large_model_consistently_better": false,
+  "best_small_training_strategy": "small",
+  "small_strategy_selection_constraint": "highest recall among candidates with pooled cross-validated false-positive rate at or below the configured cap; if none qualify, lowest false-positive rate then highest recall",
+  "pruning_improvement_survives": null,
+  "selected_architecture": "small",
+  "cv_results": {
+    "small_calibration_only": {
+      "folds": 5,
+      "mean_fold_recall": 0.27142857142857146,
+      "pooled_recall": 0.2714285714285714,
+      "false_positives": 7,
+      "false_positive_rate": 0.1,
+      "normal_clips": 70,
+      "anomaly_clips": 70,
+      "fold_metrics": [
+        {
+          "fold": 1,
+          "threshold": 0.9303318858146667,
+          "thresholds_by_domain": {
+            "source": 0.9303318858146667,
+            "target": 0.933441698551178
+          },
+          "calibration_false_positives": 0,
+          "calibration_normal_count": 14,
+          "metrics": {
+            "f1": 0.3333333333333333,
+            "precision": 0.75,
+            "recall": 0.21428571428571427,
+            "false_positives": 1,
+            "true_positives": 3,
+            "false_positive_rate": 0.07142857142857142,
+            "confusion_matrix_normal_anomaly": [
+              [
+                13,
+                1
+              ],
+              [
+                11,
+                3
+              ]
+            ],
+            "samples": 28,
+            "anomalies": 14
+          }
+        },
+        {
+          "fold": 2,
+          "threshold": 0.817664623260498,
+          "thresholds_by_domain": {
+            "source": 0.817664623260498,
+            "target": 0.7409147024154663
+          },
+          "calibration_false_positives": 0,
+          "calibration_normal_count": 14,
+          "metrics": {
+            "f1": 0.6153846153846154,
+            "precision": 0.6666666666666666,
+            "recall": 0.5714285714285714,
+            "false_positives": 4,
+            "true_positives": 8,
+            "false_positive_rate": 0.2857142857142857,
+            "confusion_matrix_normal_anomaly": [
+              [
+                10,
+                4
+              ],
+              [
+                6,
+                8
+              ]
+            ],
+            "samples": 28,
+            "anomalies": 14
+          }
+        },
+        {
+          "fold": 3,
+          "threshold": 0.773655116558075,
+          "thresholds_by_domain": {
+            "source": 0.6684383749961853,
+            "target": 0.773655116558075
+          },
+          "calibration_false_positives": 0,
+          "calibration_normal_count": 14,
+          "metrics": {
+            "f1": 0.2222222222222222,
+            "precision": 0.5,
+            "recall": 0.14285714285714285,
+            "false_positives": 2,
+            "true_positives": 2,
+            "false_positive_rate": 0.14285714285714285,
+            "confusion_matrix_normal_anomaly": [
+              [
+                12,
+                2
+              ],
+              [
+                12,
+                2
+              ]
+            ],
+            "samples": 28,
+            "anomalies": 14
+          }
+        },
+        {
+          "fold": 4,
+          "threshold": 0.8717451095581055,
+          "thresholds_by_domain": {
+            "source": 0.8717451095581055,
+            "target": 0.8367465734481812
+          },
+          "calibration_false_positives": 0,
+          "calibration_normal_count": 14,
+          "metrics": {
+            "f1": 0.4444444444444444,
+            "precision": 1.0,
+            "recall": 0.2857142857142857,
+            "false_positives": 0,
+            "true_positives": 4,
+            "false_positive_rate": 0.0,
+            "confusion_matrix_normal_anomaly": [
+              [
+                14,
+                0
+              ],
+              [
+                10,
+                4
+              ]
+            ],
+            "samples": 28,
+            "anomalies": 14
+          }
+        },
+        {
+          "fold": 5,
+          "threshold": 0.7206130623817444,
+          "thresholds_by_domain": {
+            "source": 0.6588382720947266,
+            "target": 0.8093609809875488
+          },
+          "calibration_false_positives": 0,
+          "calibration_normal_count": 14,
+          "metrics": {
+            "f1": 0.25,
+            "precision": 1.0,
+            "recall": 0.14285714285714285,
+            "false_positives": 0,
+            "true_positives": 2,
+            "false_positive_rate": 0.0,
+            "confusion_matrix_normal_anomaly": [
+              [
+                14,
+                0
+              ],
+              [
+                12,
+                2
+              ]
+            ],
+            "samples": 28,
+            "anomalies": 14
+          }
+        }
+      ]
+    },
+    "small": {
+      "folds": 5,
+      "mean_fold_recall": 0.2571428571428571,
+      "pooled_recall": 0.2571428571428571,
+      "false_positives": 2,
+      "false_positive_rate": 0.02857142857142857,
+      "normal_clips": 70,
+      "anomaly_clips": 70,
+      "fold_metrics": [
+        {
+          "fold": 1,
+          "threshold": 0.8477768898010254,
+          "thresholds_by_domain": {
+            "source": 0.7115774154663086,
+            "target": 0.8477768898010254
+          },
+          "calibration_false_positives": 0,
+          "calibration_normal_count": 14,
+          "metrics": {
+            "f1": 0.35294117647058826,
+            "precision": 1.0,
+            "recall": 0.21428571428571427,
+            "false_positives": 0,
+            "true_positives": 3,
+            "false_positive_rate": 0.0,
+            "confusion_matrix_normal_anomaly": [
+              [
+                14,
+                0
+              ],
+              [
+                11,
+                3
+              ]
+            ],
+            "samples": 28,
+            "anomalies": 14
+          }
+        },
+        {
+          "fold": 2,
+          "threshold": 0.9823909401893616,
+          "thresholds_by_domain": {
+            "source": 0.9829482436180115,
+            "target": 0.9823909401893616
+          },
+          "calibration_false_positives": 0,
+          "calibration_normal_count": 14,
+          "metrics": {
+            "f1": 0.5263157894736842,
+            "precision": 1.0,
+            "recall": 0.35714285714285715,
+            "false_positives": 0,
+            "true_positives": 5,
+            "false_positive_rate": 0.0,
+            "confusion_matrix_normal_anomaly": [
+              [
+                14,
+                0
+              ],
+              [
+                9,
+                5
+              ]
+            ],
+            "samples": 28,
+            "anomalies": 14
+          }
+        },
+        {
+          "fold": 3,
+          "threshold": 0.9495635032653809,
+          "thresholds_by_domain": {
+            "source": 0.9495635032653809,
+            "target": 0.8040821552276611
+          },
+          "calibration_false_positives": 0,
+          "calibration_normal_count": 14,
+          "metrics": {
+            "f1": 0.2222222222222222,
+            "precision": 0.5,
+            "recall": 0.14285714285714285,
+            "false_positives": 2,
+            "true_positives": 2,
+            "false_positive_rate": 0.14285714285714285,
+            "confusion_matrix_normal_anomaly": [
+              [
+                12,
+                2
+              ],
+              [
+                12,
+                2
+              ]
+            ],
+            "samples": 28,
+            "anomalies": 14
+          }
+        },
+        {
+          "fold": 4,
+          "threshold": 0.9890502691268921,
+          "thresholds_by_domain": {
+            "source": 0.9911589026451111,
+            "target": 0.9890502691268921
+          },
+          "calibration_false_positives": 0,
+          "calibration_normal_count": 14,
+          "metrics": {
+            "f1": 0.7272727272727273,
+            "precision": 1.0,
+            "recall": 0.5714285714285714,
+            "false_positives": 0,
+            "true_positives": 8,
+            "false_positive_rate": 0.0,
+            "confusion_matrix_normal_anomaly": [
+              [
+                14,
+                0
+              ],
+              [
+                6,
+                8
+              ]
+            ],
+            "samples": 28,
+            "anomalies": 14
+          }
+        },
+        {
+          "fold": 5,
+          "threshold": 0.9220334887504578,
+          "thresholds_by_domain": {
+            "source": 0.9220334887504578,
+            "target": 0.9244334697723389
+          },
+          "calibration_false_positives": 0,
+          "calibration_normal_count": 14,
+          "metrics": {
+            "f1": 0.0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "false_positives": 0,
+            "true_positives": 0,
+            "false_positive_rate": 0.0,
+            "confusion_matrix_normal_anomaly": [
+              [
+                14,
+                0
+              ],
+              [
+                14,
+                0
+              ]
+            ],
+            "samples": 28,
+            "anomalies": 14
+          }
+        }
+      ]
+    },
+    "large": {
+      "folds": 5,
+      "mean_fold_recall": 0.2571428571428571,
+      "pooled_recall": 0.2571428571428571,
+      "false_positives": 2,
+      "false_positive_rate": 0.02857142857142857,
+      "normal_clips": 70,
+      "anomaly_clips": 70,
+      "fold_metrics": [
+        {
+          "fold": 1,
+          "threshold": 0.9590639472007751,
+          "thresholds_by_domain": {
+            "source": 0.9480990767478943,
+            "target": 0.9590639472007751
+          },
+          "calibration_false_positives": 0,
+          "calibration_normal_count": 14,
+          "metrics": {
+            "f1": 0.3157894736842105,
+            "precision": 0.6,
+            "recall": 0.21428571428571427,
+            "false_positives": 2,
+            "true_positives": 3,
+            "false_positive_rate": 0.14285714285714285,
+            "confusion_matrix_normal_anomaly": [
+              [
+                12,
+                2
+              ],
+              [
+                11,
+                3
+              ]
+            ],
+            "samples": 28,
+            "anomalies": 14
+          }
+        },
+        {
+          "fold": 2,
+          "threshold": 0.9924537539482117,
+          "thresholds_by_domain": {
+            "source": 0.9924537539482117,
+            "target": 0.9932030439376831
+          },
+          "calibration_false_positives": 0,
+          "calibration_normal_count": 14,
+          "metrics": {
+            "f1": 0.5263157894736842,
+            "precision": 1.0,
+            "recall": 0.35714285714285715,
+            "false_positives": 0,
+            "true_positives": 5,
+            "false_positive_rate": 0.0,
+            "confusion_matrix_normal_anomaly": [
+              [
+                14,
+                0
+              ],
+              [
+                9,
+                5
+              ]
+            ],
+            "samples": 28,
+            "anomalies": 14
+          }
+        },
+        {
+          "fold": 3,
+          "threshold": 0.9615004658699036,
+          "thresholds_by_domain": {
+            "source": 0.965973973274231,
+            "target": 0.9615004658699036
+          },
+          "calibration_false_positives": 0,
+          "calibration_normal_count": 14,
+          "metrics": {
+            "f1": 0.13333333333333333,
+            "precision": 1.0,
+            "recall": 0.07142857142857142,
+            "false_positives": 0,
+            "true_positives": 1,
+            "false_positive_rate": 0.0,
+            "confusion_matrix_normal_anomaly": [
+              [
+                14,
+                0
+              ],
+              [
+                13,
+                1
+              ]
+            ],
+            "samples": 28,
+            "anomalies": 14
+          }
+        },
+        {
+          "fold": 4,
+          "threshold": 0.9975765347480774,
+          "thresholds_by_domain": {
+            "source": 0.9969084858894348,
+            "target": 0.9975765347480774
+          },
+          "calibration_false_positives": 0,
+          "calibration_normal_count": 14,
+          "metrics": {
+            "f1": 0.6666666666666666,
+            "precision": 1.0,
+            "recall": 0.5,
+            "false_positives": 0,
+            "true_positives": 7,
+            "false_positive_rate": 0.0,
+            "confusion_matrix_normal_anomaly": [
+              [
+                14,
+                0
+              ],
+              [
+                7,
+                7
+              ]
+            ],
+            "samples": 28,
+            "anomalies": 14
+          }
+        },
+        {
+          "fold": 5,
+          "threshold": 0.6653300523757935,
+          "thresholds_by_domain": {
+            "source": 0.18080204725265503,
+            "target": 0.6653300523757935
+          },
+          "calibration_false_positives": 0,
+          "calibration_normal_count": 14,
+          "metrics": {
+            "f1": 0.25,
+            "precision": 1.0,
+            "recall": 0.14285714285714285,
+            "false_positives": 0,
+            "true_positives": 2,
+            "false_positive_rate": 0.0,
+            "confusion_matrix_normal_anomaly": [
+              [
+                14,
+                0
+              ],
+              [
+                12,
+                2
+              ]
+            ],
+            "samples": 28,
+            "anomalies": 14
+          }
+        }
+      ]
+    }
+  },
+  "final_evaluation_reserved": 60,
+  "final_held_out_evaluation": {
+    "f1": 0.2777777777777778,
+    "precision": 0.8333333333333334,
+    "recall": 0.16666666666666666,
+    "false_positives": 1,
+    "true_positives": 5,
+    "false_positive_rate": 0.03333333333333333,
+    "confusion_matrix_normal_anomaly": [
+      [
+        29,
+        1
+      ],
+      [
+        25,
+        5
+      ]
+    ],
+    "samples": 60,
+    "anomalies": 30
+  }
+}

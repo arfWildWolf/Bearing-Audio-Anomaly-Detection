@@ -15,6 +15,19 @@
 			"problemMatcher": []
 		},
 		{
+			"label": "Compare Models Under False-Positive Cap",
+			"type": "shell",
+			"command": "${command:python.interpreterPath}",
+			"args": [
+				"bearing_anomaly.py",
+				"compare",
+				"--device",
+				"cuda"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
 			"label": "Check CUDA Availability",
 			"type": "shell",
 			"command": "${command:python.interpreterPath}",
